@@ -12,6 +12,7 @@
  */
 
 #include "subsystem1.h"
+#include "mqtt_bridge_api.h"
 
 /*
  * Cyclic handler.  Runs in interrupt context, NOT as a task, so it must
@@ -45,4 +46,37 @@ EXPORT void led_task(INT stacd, void *exinf)
 		level = !level;
 		gpio_set_val(S1_LED_PIN, level);
 	}
+}
+/* Buddy 1: Temporary task for testing incoming MQTT messages */
+EXPORT void mqtt_rx_test_task(INT stacd, void *exinf)
+{
+    static unsigned char rx_buffer[MQTT_BRIDGE_MSG_MAX];
+    int len;
+
+    (void)stacd;
+    (void)exinf;
+
+    while (1) {
+        /* Check for one incoming MQTT message without waiting */
+        len = mqtt_bridge_rx_receive(rx_buffer,
+                                     sizeof(rx_buffer));
+
+        if (len == 3) {
+            /* Display all three bytes for binary integrity testing */
+            tm_printf((UB*)"buddy1: RX %d bytes: %02X %02X %02X\n",
+                      len,
+                      (unsigned int)rx_buffer[0],
+                      (unsigned int)rx_buffer[1],
+                      (unsigned int)rx_buffer[2]);
+
+        } else if (len > 0) {
+            tm_printf((UB*)"buddy1: RX received %d bytes\n", len);
+
+        } else if (len < 0) {
+            tm_printf((UB*)"buddy1: RX receive error=%d\n", len);
+        }
+
+        /* Sleep for 100 ms before checking again */
+        tk_dly_tsk(100);
+    }
 }

@@ -14,34 +14,50 @@
  *	(unlike cyw43_utk.c and sys_arch.c), so it isn't subject to either
  *	file's size_t workaround -- tm/tmonitor.h alone is namespace-safe here.
  */
-
+#include <string.h>
+#include "lwip/sys.h"
 #include "lwip/apps/mqtt.h"
 #include "lwip/ip_addr.h"
 #include "lwip/timeouts.h"
 #include "wifi_secrets.h"
 #include "mqtt_utk.h"
+#include "../../../../app_program/subsystem1/mqtt_bridge_api.h"
 #include <tm/tmonitor.h>
 
 #define MQTT_UTK_HEARTBEAT_MS   5000
 #define MQTT_UTK_KEEPALIVE_S    60
 #define MQTT_UTK_RETRY_MS       3000
-
+/* Buddy 1: Wait before retrying a failed MQTT publish */
+#define MQTT_UTK_TX_RETRY_MS    1000
+/* Buddy 1: Temporary topic for testing incoming MQTT messages */
+#define MQTT_UTK_RX_TEST_TOPIC "mtk3smp-pico/cmd/test"
 /* Inbound message staging. A publish arrives as one topic callback followed by
  * one or more data callbacks, so the topic has to be kept until the fragment
  * carrying MQTT_DATA_FLAG_LAST shows up. Both buffers are sized well past the
  * heartbeat this demo publishes; anything longer is truncated and flagged
  * rather than being allowed to run off the end. */
 #define MQTT_UTK_RX_TOPIC_MAX   64
-#define MQTT_UTK_RX_DATA_MAX    128
+#define MQTT_UTK_RX_DATA_MAX    MQTT_BRIDGE_MSG_MAX
 
 static mqtt_client_t	*client;
 static ip_addr_t	broker_addr;
 static u8_t		connecting;
 
+/* Buddy 1: Hold an outgoing message until MQTT can handle it */
+static unsigned char tx_pending[MQTT_BRIDGE_MSG_MAX];
+static unsigned int tx_pending_len = 0;
+static u8_t tx_pending_valid = 0;
+static u8_t tx_publish_busy = 0;
+/* Earliest time to retry a failed publish */
+static u32_t tx_retry_at_ms = 0;
+static u8_t tx_retry_waiting = 0;
+
 static char		rx_topic[MQTT_UTK_RX_TOPIC_MAX];
 static UB		rx_data[MQTT_UTK_RX_DATA_MAX];
-static u16_t		rx_len;
+static u16_t	rx_len;
 static u8_t		rx_truncated;
+/* Buddy 1: Expected total length of the incoming MQTT payload */
+static u32_t rx_expected_len;
 
 static void heartbeat_timeout(void *arg);
 
@@ -49,18 +65,25 @@ static void heartbeat_timeout(void *arg);
  * valid for the duration of this call -- copy it out. */
 static void incoming_publish_cb(void *arg, const char *topic, u32_t tot_len)
 {
-	u32_t	i;
+    u32_t i;
 
-	(void)arg;
-	(void)tot_len;
+    (void)arg;
 
-	for(i = 0; i < (MQTT_UTK_RX_TOPIC_MAX - 1) && topic[i] != '\0'; i++) {
-		rx_topic[i] = topic[i];
-	}
-	rx_topic[i] = '\0';
+    /* Copy the MQTT topic */
+    for (i = 0; i < (MQTT_UTK_RX_TOPIC_MAX - 1) && topic[i] != '\0'; i++) {
+        rx_topic[i] = topic[i];
+    }
+    rx_topic[i] = '\0';
 
-	rx_len = 0;
-	rx_truncated = 0;
+    /* Reset the RX state for each new MQTT message */
+    rx_len = 0;
+    rx_truncated = 0;
+	rx_expected_len = tot_len;
+
+    /* Buddy 1: Reject MQTT payloads larger than our RX capacity */
+    if (tot_len > MQTT_UTK_RX_DATA_MAX) {
+        rx_truncated = 1;
+    }
 }
 
 static void incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags)
@@ -70,21 +93,42 @@ static void incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags)
 	(void)arg;
 
 	for(i = 0; i < len; i++) {
-		if(rx_len < (MQTT_UTK_RX_DATA_MAX - 1)) {
+		if (rx_len < MQTT_UTK_RX_DATA_MAX) {
 			/* The console is a terminal -- keep raw bytes from a
 			 * payload this demo did not publish from scrambling it. */
-			UB c = data[i];
-			rx_data[rx_len++] = (c >= 0x20 && c < 0x7f)? c: '.';
+			/* Preserve the original byte, including binary values */
+			rx_data[rx_len++] = data[i];
 		} else {
 			rx_truncated = 1;
 		}
 	}
 
-	if((flags & MQTT_DATA_FLAG_LAST) != 0) {
-		rx_data[rx_len] = '\0';
-		tm_printf((UB*)"mqtt: RX [%s] \"%s\"%s\n", rx_topic, rx_data,
-			  rx_truncated? " (truncated)": "");
-	}
+	/* A complete MQTT message has arrived */
+if ((flags & MQTT_DATA_FLAG_LAST) != 0) {
+    if (rx_truncated || rx_len != rx_expected_len) {
+        /* Reject incomplete or oversized messages */
+        tm_printf((UB*)"mqtt: RX [%s] dropped (oversized or incomplete)\n",
+          rx_topic);
+   } else if (strcmp(rx_topic, MQTT_UTK_RX_TEST_TOPIC) == 0) {
+    /* Buddy 1: Forward the complete test message to the RX buffer */
+    int result;
+
+    if (rx_len == 0) {
+        tm_printf((UB*)"mqtt: RX empty message ignored\n");
+    } else {
+        result = mqtt_bridge_rx_send(rx_data,
+                                     (unsigned int)rx_len);
+
+        if (result == 0) {
+            tm_printf((UB*)"mqtt: RX queued %u bytes\n",
+                      (unsigned int)rx_len);
+        } else {
+            tm_printf((UB*)"mqtt: RX queue failed, err=%d\n",
+                      result);
+        }
+    }
+}
+}
 }
 
 static void subscribe_done_cb(void *arg, err_t result)
@@ -97,12 +141,48 @@ static void subscribe_done_cb(void *arg, err_t result)
 	}
 }
 
+/* Buddy 1: Handle subscription to the RX test topic */
+static void rx_subscribe_done_cb(void *arg, err_t result)
+{
+    (void)arg;
+
+    if (result == ERR_OK) {
+        tm_printf((UB*)"mqtt: subscribed to "
+                  MQTT_UTK_RX_TEST_TOPIC "\n");
+    } else {
+        tm_printf((UB*)"mqtt: RX test subscribe failed, err=%d\n",
+                  (int)result);
+    }
+}
+
 static void publish_done_cb(void *arg, err_t result)
 {
 	(void)arg;
 	if(result != ERR_OK) {
 		tm_printf((UB*)"mqtt: publish failed, err=%d\n", (int)result);
 	}
+}
+
+/* Buddy 1: Handle completion of a queued MQTT publish */
+static void bridge_publish_done_cb(void *arg, err_t result)
+{
+    (void)arg;
+
+    /* Publish attempt is no longer in progress */
+    tx_publish_busy = 0;
+
+    if (result == ERR_OK) {
+        /* MQTT library successfully processed this publish */
+        tx_pending_valid = 0;
+        tx_pending_len = 0;
+    } else {
+        /* Keep the message and retry after 1 second */
+        tx_retry_at_ms = sys_now() + MQTT_UTK_TX_RETRY_MS;
+        tx_retry_waiting = 1;
+
+        tm_printf((UB*)"mqtt: bridge publish failed, err=%d\n",
+                  (int)result);
+    }
 }
 
 static void heartbeat_timeout(void *arg)
@@ -166,6 +246,14 @@ static void connection_cb(mqtt_client_t *c, void *arg, mqtt_connection_status_t 
 				  (int)err);
 		}
 
+		/* Buddy 1: Subscribe to incoming test messages */
+		err = mqtt_subscribe(client, MQTT_UTK_RX_TEST_TOPIC,
+							0 /* qos */, rx_subscribe_done_cb, NULL);
+
+		if (err != ERR_OK) {
+			tm_printf((UB*)"mqtt: RX test subscription request failed, err=%d\n",
+					(int)err);
+}
 		/* Drop any chain left over from a previous connection before
 		 * arming a new one. Each reconnect would otherwise add another
 		 * self-perpetuating heartbeat, and every one of them holds a
@@ -173,6 +261,8 @@ static void connection_cb(mqtt_client_t *c, void *arg, mqtt_connection_status_t 
 		sys_untimeout(heartbeat_timeout, NULL);
 		sys_timeout(MQTT_UTK_HEARTBEAT_MS, heartbeat_timeout, NULL);
 	} else {
+		/* Allow pending telemetry to retry after disconnection */
+		tx_publish_busy = 0;
 		/* mqtt_client_connect() reconnects on its own for a dropped
 		 * keepalive; a rejected/never-established connection does not
 		 * retry itself, so do that here -- on a delay, so a broker
@@ -216,5 +306,61 @@ void mqtt_utk_start(void)
 	if(err != ERR_OK) {
 		tm_printf((UB*)"mqtt: mqtt_client_connect() failed, err=%d\n", (int)err);
 		connecting = 0;
+	}
+}
+
+/* Buddy 1: Process one outgoing MQTT message without blocking */
+void mqtt_utk_poll_tx(void)
+{
+    int len;
+    err_t err;
+
+    /* Only publish when MQTT is connected */
+    if (client == NULL || !mqtt_client_is_connected(client)) {
+        return;
+    }
+
+    /* Wait until the previous publish has finished */
+    if (tx_publish_busy) {
+        return;
+    }
+	/* Wait until the retry delay has passed */
+	if (tx_retry_waiting) {
+		if ((s32_t)(sys_now() - tx_retry_at_ms) < 0) {
+			return;
+		}
+		tx_retry_waiting = 0;
+	}
+
+    /* Retrieve a new message only if none is pending */
+    if (!tx_pending_valid) {
+        len = mqtt_bridge_tx_receive(tx_pending,
+                                     sizeof(tx_pending));
+
+        if (len <= 0) {
+            return;
+        }
+
+        tx_pending_len = (unsigned int)len;
+        tx_pending_valid = 1;
+    }
+
+    /* Hand the pending message to MQTT */
+    tx_publish_busy = 1;
+
+    err = mqtt_publish(client, MQTT_TOPIC,
+                       tx_pending, (u16_t)tx_pending_len,
+                       0, 0,
+                       bridge_publish_done_cb, NULL);
+
+    if (err != ERR_OK) {
+		/* Keep the message and wait 1 second before retrying */
+		tx_publish_busy = 0;
+
+		tx_retry_at_ms = sys_now() + MQTT_UTK_TX_RETRY_MS;
+		tx_retry_waiting = 1;
+
+		tm_printf((UB*)"mqtt: bridge publish request failed, err=%d\n",
+				(int)err);
 	}
 }

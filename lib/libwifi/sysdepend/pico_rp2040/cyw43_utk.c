@@ -340,6 +340,7 @@ void cyw43_utk_task(int32_t stacd, void *exinf)
          * again after connection_cb() schedules a retry. */
         if(radio_status.link_status == CYW43_LINK_UP) {
             mqtt_utk_start();
+            mqtt_utk_poll_tx();  /* Buddy 1: Process outgoing messages */
         }
 #endif
 #endif

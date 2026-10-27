@@ -14,5 +14,9 @@
  * than once -- a second call while already connecting/connected is a no-op.
  */
 void mqtt_utk_start(void);
-
+/*
+ * Process outgoing MQTT messages from Buddy 1's TX buffer.
+ * Must only be called from the WiFi service task.
+ */
+void mqtt_utk_poll_tx(void);
 #endif /* MQTT_UTK_H */
