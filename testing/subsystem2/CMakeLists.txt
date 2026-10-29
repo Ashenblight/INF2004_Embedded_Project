@@ -1,27 +1,29 @@
 cmake_minimum_required(VERSION 3.13)
 
-# Include Pico SDK tools
-include(pico_sdk_import.cmake)
+# Pull in SDK from environment or parent
+if (DEFINED ENV{PICO_SDK_PATH})
+    set(PICO_SDK_PATH $ENV{PICO_SDK_PATH})
+    include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+else()
+    include(../../pico_sdk_import.cmake OPTIONAL)
+endif()
 
-project(inf2004_motion_control C CXX ASM)
+project(subsystem2_standalone C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 
 pico_sdk_init()
 
-add_executable(motion_subsystem
+add_executable(test_subsystem2
     src/motor_driver.c
     src/encoder_driver.c
-    src/motion_control.c
-    # Teammate main & RTOS kernel sources added here
+    src/test_main.c
 )
 
-target_include_directories(motion_subsystem PRIVATE
+target_include_directories(test_subsystem2 PRIVATE
     include
-    ${PICO_SDK_PATH}/src/rp2_common/hardware_pwm/include
-    ${PICO_SDK_PATH}/src/rp2_common/hardware_sync/include
 )
 
-target_link_libraries(motion_subsystem
+target_link_libraries(test_subsystem2
     pico_stdlib
     hardware_pwm
     hardware_sync
@@ -29,8 +31,8 @@ target_link_libraries(motion_subsystem
     hardware_irq
 )
 
-# Crucial Architectural Mitigation: Route console to USB CDC, NOT UART0 (protects GP1)
-pico_enable_stdio_usb(motion_subsystem 1)
-pico_enable_stdio_uart(motion_subsystem 0)
+# Route logging strictly to USB CDC (keeps GP1 free from UART pulses)
+pico_enable_stdio_usb(test_subsystem2 1)
+pico_enable_stdio_uart(test_subsystem2 0)
 
-pico_add_extra_outputs(motion_subsystem)
+pico_add_extra_outputs(test_subsystem2)
