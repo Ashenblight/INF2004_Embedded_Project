@@ -2,7 +2,7 @@
  *  @brief Register-level quadrature encoder driver interface.
  *
  *  Manages quadrature encoder edge capture on GP1, GP3, GP5, and GP7
- *  and provides atomic 32-bit tick snapshot access.
+ *  via dedicated GPIO edge interrupts, with a shared dispatcher for GP17 echo pulses.
  */
 #ifndef DRV_ENCODER_H
 #define DRV_ENCODER_H
