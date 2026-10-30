@@ -25,3 +25,6 @@ config/wifi_secrets.h
 
 # macOS
 .DS_Store
+
+# .vscode folder
+.vscode/
