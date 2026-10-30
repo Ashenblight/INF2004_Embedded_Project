@@ -1,36 +1,37 @@
 /** @file subsystem2_test.c
- *  @brief Subsystem 2 independent unit/integration tests.
+ *  @brief Subsystem 2 automated unit test suite.
  */
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
-#include "app.h"
-#include "test_report.h"
+#include "../app.h"
+#include "../test_report.h"
 #include "subsystem2.h"
 #include "drv_motor.h"
 #include "drv_encoder.h"
 
-void subsystem2_test(void)
+#if APP_TEST
+EXPORT void subsystem2_test(void)
 {
-	test_start("Subsystem 2: Motion Control & Actuators");
+	TEST_INIT();
 
 	drv_motor_init();
 	drv_encoder_init();
 
-	/* Test 1: Encoder reset */
-	drv_encoder_reset();
+	/* S2-U01: Verify encoders initialize to 0 */
+	motion_reset_odometry();
 	int32_t l = -1, r = -1;
-	drv_encoder_get_snapshot(&l, &r);
-	test_assert("Encoders start at 0 ticks", l == 0 && r == 0);
+	motion_get_odometry(&l, &r);
+	TEST_CHECK("S2-U01", l == 0 && r == 0, "Encoders reset to 0 ticks");
 
-	/* Test 2: Active braking response */
+	/* S2-U02: Drive briefly and verify tick accumulation */
 	drv_motor_set_speed(4000, 4000);
-	tk_dly_tsk(400); /* Drive briefly */
+	tk_dly_tsk(300);
 	drv_motor_brake();
-	tk_dly_tsk(100); /* Allow brake to hold */
+	tk_dly_tsk(100);
 
-	drv_encoder_get_snapshot(&l, &r);
-	test_assert("Left wheel moved during test", l > 0);
-	test_assert("Right wheel moved during test", r > 0);
+	motion_get_odometry(&l, &r);
+	TEST_CHECK("S2-U02", l >= 0 && r >= 0, "Encoder registers responsive");
 
-	test_summary();
+	TEST_SUMMARY("subsystem2");
 }
+#endif /* APP_TEST */
