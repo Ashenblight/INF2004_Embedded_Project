@@ -61,27 +61,29 @@
  */
 EXPORT ID app_start_task(FP entry, PRI pri, UW prc, const char *name)
 {
-	T_CTSK	ctsk = {0};
-	ID	tid;
-	ER	er;
+	T_CTSK ctsk = {0};
+	ID tid;
+	ER er;
 
-	ctsk.task    = entry;		/* function the task runs */
-	ctsk.itskpri = pri;		/* initial priority (1 = highest) */
-	ctsk.stksz   = TASK_STACK_SIZE;	/* kernel allocates the stack */
-	ctsk.tskatr  = TA_HLNG		/* written in a high-level language (C) */
-		     | TA_RNG3;		/* runs at user protection level */
+	ctsk.task = entry;			  /* function the task runs */
+	ctsk.itskpri = pri;			  /* initial priority (1 = highest) */
+	ctsk.stksz = TASK_STACK_SIZE; /* kernel allocates the stack */
+	ctsk.tskatr = TA_HLNG		  /* written in a high-level language (C) */
+				  | TA_RNG3;	  /* runs at user protection level */
 #if TK_SUPPORT_SMP
-	if (prc != 0) {
-		ctsk.tskatr |= TA_ASSPRC;	/* honour the affinity below */
-		ctsk.assprc  = prc;		/* which core(s) it may run on */
+	if (prc != 0)
+	{
+		ctsk.tskatr |= TA_ASSPRC; /* honour the affinity below */
+		ctsk.assprc = prc;		  /* which core(s) it may run on */
 	}
 #else
-	(void)prc;			/* single-core build: no affinity */
+	(void)prc; /* single-core build: no affinity */
 #endif
 
 	/* tk_cre_tsk: create the task.  It starts in the DORMANT state. */
 	tid = tk_cre_tsk(&ctsk);
-	if (tid < E_OK) {
+	if (tid < E_OK)
+	{
 		CHECK(tid, name);
 		return tid;
 	}
@@ -94,17 +96,18 @@ EXPORT ID app_start_task(FP entry, PRI pri, UW prc, const char *name)
 
 EXPORT INT usermain(void)
 {
-	T_RVER	ver;
+	T_RVER ver;
 
 	/* tk_ref_ver: ask the kernel who it is */
 	tk_ref_ver(&ver);
-	tm_printf((UB*)"\n=== micro T-Kernel on Raspberry Pi Pico W"
-		  " (spec 0x%04x, product 0x%04x) ===\n", ver.spver, ver.prver);
+	tm_printf((UB *)"\n=== micro T-Kernel on Raspberry Pi Pico W"
+					" (spec 0x%04x, product 0x%04x) ===\n",
+			  ver.spver, ver.prver);
 #if TK_SUPPORT_SMP
-	tm_printf((UB*)"dual-core (SMP) build, usermain on core %d\n",
-		  tk_get_prc() - 1);	/* tk_get_prc() counts from 1 */
+	tm_printf((UB *)"dual-core (SMP) build, usermain on core %d\n",
+			  tk_get_prc() - 1); /* tk_get_prc() counts from 1 */
 #else
-	tm_printf((UB*)"single-core build\n");
+	tm_printf((UB *)"single-core build\n");
 #endif
 
 	/* Phase 1: every subsystem creates its kernel objects */
@@ -121,19 +124,19 @@ EXPORT INT usermain(void)
 	CHECK(subsystem4_start(), "subsystem4_start");
 	CHECK(subsystem5_start(), "subsystem5_start");
 
-	tm_printf((UB*)"all subsystems started\n\n");
+	tm_printf((UB *)"all subsystems started\n\n");
 
 #if APP_TEST
 	/* Test build (make TEST=1): run every subsystem's tests in turn,
 	   here in the initial task, while the system is running.  Tests may
 	   call tk_dly_tsk() to let the other tasks work for a while. */
-	tm_printf((UB*)"[TEST] === test run start ===\n");
+	tm_printf((UB *)"[TEST] === test run start ===\n");
 	subsystem1_test();
 	subsystem2_test();
 	subsystem3_test();
 	subsystem4_test();
 	subsystem5_test();
-	tm_printf((UB*)"[TEST] === test run end ===\n");
+	tm_printf((UB *)"[TEST] === test run end ===\n");
 #endif
 
 	/* Sleep forever.  Returning from usermain() would shut down. */

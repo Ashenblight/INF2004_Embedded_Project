@@ -17,6 +17,8 @@
 #define FLAG_STOPPED_CONFIRMED (0x00000002u)
 #define FLAG_MOVEMENT_COMPLETE (0x00000004u)
 
+#define DEBUG_MOTION_HEARTBEAT (0) /* Set to 1 only during standalone bench testing */
+
 /* ------------------------------------------------------------------------- */
 /* Compatibility Handles for Subsystems 3 & 4                                */
 /* ------------------------------------------------------------------------- */
@@ -141,6 +143,11 @@ static void motion_control_task(INT stacd, void *p_exinf)
 	int32_t integ_l = 0, integ_r = 0;
 	uint32_t brake_timer = 0u;
 
+#if DEBUG_MOTION_HEARTBEAT
+	int32_t curr_l = 0, curr_r = 0;
+	uint32_t heartbeat = 0u;
+#endif
+
 	drv_motor_init();
 	drv_encoder_init();
 
@@ -155,6 +162,15 @@ static void motion_control_task(INT stacd, void *p_exinf)
 		const int8_t delta_r = (int8_t)(curr_r - last_r);
 		last_l = curr_l;
 		last_r = curr_r;
+
+#if DEBUG_MOTION_HEARTBEAT
+		/* Heartbeat print once every second (100 * 10 ms = 1000 ms) */
+		if (++heartbeat >= 100u)
+		{
+			heartbeat = 0u;
+			tm_printf((UB *)"S2 Motion Task Active | L=%d R=%d\n", curr_l, curr_r);
+		}
+#endif
 
 		/* ----------------------------------------------------------------- */
 		/* Check for Emergency Stop (Non-blocking poll via TMO_POL)          */
