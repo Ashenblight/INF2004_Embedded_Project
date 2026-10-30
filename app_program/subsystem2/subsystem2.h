@@ -3,6 +3,8 @@
  *
  *  Exposes clean procedural APIs for Vehicle Controller, Line Following,
  *  Barcode, and Telemetry, along with Change Requirement 1 bitfields.
+ *
+ *  INF2004 Embedded Systems Programming - Subsystem 2
  */
 #ifndef SUBSYSTEM2_H
 #define SUBSYSTEM2_H
@@ -56,7 +58,7 @@ typedef struct
 
 	uint8_t encoder_fault : 1;		/* 1 bit: 0 = nominal, 1 = pulse/transition fault */
 	uint8_t stop_timeout_fault : 1; /* 1 bit: 0 = nominal, 1 = stop deadline overrun */
-	uint8_t line_mode_en : 1;		/* 1 bit: 0 = manual/steer locked, 1 = line following active */
+	uint8_t line_mode_en : 1;		/* 1 bit: 0 = steer locked, 1 = line following active */
 	uint8_t reserved : 5;			/* 5 bits: padding to align to 32 bits */
 } __attribute__((packed)) motion_status_packed_t;
 
@@ -87,11 +89,12 @@ IMPORT ER subsystem2_start(void);
 /* ========================================================================= */
 /* 2. Actuator / Manoeuvre APIs (Called by Vehicle Controller)               */
 /* ========================================================================= */
-ER motion_move_forward(uint16_t distance_mm);
-ER motion_move_backward(uint16_t distance_mm);
-ER motion_point_turn(int16_t angle_deg);
-ER motion_start_continuous(void);
+ER motion_move_forward(uint16_t distance_mm, uint8_t speed_duty);
+ER motion_move_backward(uint16_t distance_mm, uint8_t speed_duty);
+ER motion_point_turn(int16_t angle_deg, uint8_t speed_duty);
+ER motion_start_continuous(uint8_t speed_duty);
 void motion_emergency_stop(void);
+void motion_clear_emergency_stop(void);
 
 /* ========================================================================= */
 /* 3. Line Following Streaming APIs (Called by Line Following)              */
@@ -100,15 +103,10 @@ void motion_set_mode_line_following(bool is_enabled);
 void motion_update_steering(int8_t steering_correction);
 
 /* ========================================================================= */
-/* 4. Sensor & Telemetry APIs (Called by Buddy 1 Telemetry, IMU, Barcode)   */
+/* 4. Sensor & Telemetry APIs (Called by Telemetry, IMU, Barcode)           */
 /* ========================================================================= */
 void motion_get_odometry(int32_t *p_left_ticks, int32_t *p_right_ticks);
 void motion_reset_odometry(void);
-
-/**
- * @brief Thread-safe atomic read of the 4-byte CR1 bit-packed motion telemetry.
- * @param[out] p_out_status Pointer to user-allocated struct to receive snapshot.
- */
 void motion_get_status(motion_status_packed_t *p_out_status);
 
 #endif /* SUBSYSTEM2_H */
