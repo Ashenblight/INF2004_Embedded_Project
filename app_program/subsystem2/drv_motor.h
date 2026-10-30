@@ -18,7 +18,7 @@
 /* Change Requirement 1: 2-bit motor operating mode */
 typedef enum
 {
-    MOTOR_MODE_COAST = 0u,       /* Inputs floating / high-Z */
+    MOTOR_MODE_COAST = 0u,       /* High-Z / Terminals floating */
     MOTOR_MODE_FORWARD = 1u,     /* Forward drive PWM */
     MOTOR_MODE_REVERSE = 2u,     /* Reverse drive PWM */
     MOTOR_MODE_ACTIVE_BRAKE = 3u /* Active dynamic brake (shorted coils) */
@@ -36,7 +36,7 @@ void drv_motor_init(void);
 void drv_motor_brake(void);
 
 /*!
- * @brief Release motor coils into coasting.
+ * @brief Release motor coils into coasting by pulling both terminals HIGH (Hi-Z).
  */
 void drv_motor_coast(void);
 
