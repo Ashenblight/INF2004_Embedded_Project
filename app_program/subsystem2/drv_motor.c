@@ -75,26 +75,38 @@ void drv_motor_init(void)
 
 void drv_motor_brake(void)
 {
-    /* Short coils to ground: active back-EMF dynamic braking */
+    /* Pull both terminals to ground (LOW/LOW): dynamic back-EMF braking */
     REG_PWM_CH_CC(PWM_SLICE_LEFT) = 0UL;
     REG_PWM_CH_CC(PWM_SLICE_RIGHT) = 0UL;
 }
 
 void drv_motor_coast(void)
 {
-    drv_motor_brake();
+    /* Pull both terminals to VDD (HIGH/HIGH): floating Hi-Z coasting */
+    const uint32_t high_high = ((uint32_t)MOTOR_PWM_WRAP_COUNT << 16U) | (uint32_t)MOTOR_PWM_WRAP_COUNT;
+    REG_PWM_CH_CC(PWM_SLICE_LEFT) = high_high;
+    REG_PWM_CH_CC(PWM_SLICE_RIGHT) = high_high;
 }
 
 void drv_motor_set_speed(int16_t left_pwm, int16_t right_pwm)
 {
     if (left_pwm > (int16_t)MOTOR_PWM_WRAP_COUNT)
+    {
         left_pwm = (int16_t)MOTOR_PWM_WRAP_COUNT;
-    if (left_pwm < -(int16_t)MOTOR_PWM_WRAP_COUNT)
+    }
+    else if (left_pwm < -(int16_t)MOTOR_PWM_WRAP_COUNT)
+    {
         left_pwm = -(int16_t)MOTOR_PWM_WRAP_COUNT;
+    }
+
     if (right_pwm > (int16_t)MOTOR_PWM_WRAP_COUNT)
+    {
         right_pwm = (int16_t)MOTOR_PWM_WRAP_COUNT;
-    if (right_pwm < -(int16_t)MOTOR_PWM_WRAP_COUNT)
+    }
+    else if (right_pwm < -(int16_t)MOTOR_PWM_WRAP_COUNT)
+    {
         right_pwm = -(int16_t)MOTOR_PWM_WRAP_COUNT;
+    }
 
     /* Left Wheel (Slice 4: Lower 16-bit = M1A, Upper 16-bit = M1B) */
     if (left_pwm > 0)
