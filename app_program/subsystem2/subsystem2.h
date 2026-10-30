@@ -39,31 +39,31 @@ typedef struct
 	uint32_t speed_duty : 7;		  /* 7 bits: 0-100% duty cycle */
 	int32_t target_angle_deg : 9;	  /* 9 bits signed: -180 to +180 deg */
 	uint32_t target_distance_mm : 10; /* 10 bits: 0 to 1023 mm */
-	uint32_t reserved : 4;
+	uint32_t reserved : 4;			  /* 4 bits padding */
 } __attribute__((packed)) motion_command_packed_t;
 
 _Static_assert(sizeof(motion_command_packed_t) == 4u, "motion_command_packed_t must be 4 bytes!");
 
 typedef struct
 {
-	uint8_t state : 3;			   /* 3 bits: 6 operating states */
-	uint8_t left_motor_mode : 2;   /* 2 bits: motor_mode_t */
-	uint8_t right_motor_mode : 2;  /* 2 bits: motor_mode_t */
-	uint8_t motor_stall_fault : 1; /* 1 bit */
+	uint8_t state : 3;			   /* 3 bits: 6 operating states (0 to 5) */
+	uint8_t left_motor_mode : 2;   /* 2 bits: motor_mode_t (0 to 3) */
+	uint8_t right_motor_mode : 2;  /* 2 bits: motor_mode_t (0 to 3) */
+	uint8_t motor_stall_fault : 1; /* 1 bit: 0 = nominal, 1 = stall alert */
 
-	int8_t left_delta_ticks;  /* 8-bit signed delta */
-	int8_t right_delta_ticks; /* 8-bit signed delta */
+	int8_t left_delta_ticks;  /* 8-bit signed delta per 10 ms (-128 to +127) */
+	int8_t right_delta_ticks; /* 8-bit signed delta per 10 ms (-128 to +127) */
 
-	uint8_t encoder_fault : 1;		/* 1 bit */
-	uint8_t stop_timeout_fault : 1; /* 1 bit */
-	uint8_t line_mode_en : 1;		/* 1 bit */
-	uint8_t reserved : 5;
+	uint8_t encoder_fault : 1;		/* 1 bit: 0 = nominal, 1 = pulse/transition fault */
+	uint8_t stop_timeout_fault : 1; /* 1 bit: 0 = nominal, 1 = stop deadline overrun */
+	uint8_t line_mode_en : 1;		/* 1 bit: 0 = manual/steer locked, 1 = line following active */
+	uint8_t reserved : 5;			/* 5 bits: padding to align to 32 bits */
 } __attribute__((packed)) motion_status_packed_t;
 
 _Static_assert(sizeof(motion_status_packed_t) == 4u, "motion_status_packed_t must be 4 bytes!");
 
 /* ========================================================================= */
-/* Compatibility Symbols for Subsystems 3 & 4 (Prevents build failure)       */
+/* Compatibility Symbols for Subsystems 3 & 4                                */
 /* ========================================================================= */
 typedef struct
 {
@@ -87,67 +87,28 @@ IMPORT ER subsystem2_start(void);
 /* ========================================================================= */
 /* 2. Actuator / Manoeuvre APIs (Called by Vehicle Controller)               */
 /* ========================================================================= */
-
-/**
- * @brief Command vehicle to drive forward by a set distance.
- * @param[in] distance_mm  Distance in millimeters (0 to 1023 mm).
- * @return E_OK on success, or negative error code if buffer full.
- */
 ER motion_move_forward(uint16_t distance_mm);
-
-/**
- * @brief Command vehicle to drive backward by a set distance.
- * @param[in] distance_mm  Distance in millimeters (0 to 1023 mm).
- * @return E_OK on success, or negative error code.
- */
 ER motion_move_backward(uint16_t distance_mm);
-
-/**
- * @brief Execute an in-place differential point turn.
- * @param[in] angle_deg  Relative angle (-180 to +180 deg; positive = right/CW).
- * @return E_OK on success, or negative error code.
- */
 ER motion_point_turn(int16_t angle_deg);
-
-/**
- * @brief Command vehicle into continuous line-following cruise drive.
- * @return E_OK on success, or negative error code.
- */
 ER motion_start_continuous(void);
-
-/**
- * @brief Trigger an immediate active dynamic brake halt.
- * Bypasses queued motion commands via high-priority event flag.
- */
 void motion_emergency_stop(void);
 
 /* ========================================================================= */
 /* 3. Line Following Streaming APIs (Called by Line Following)              */
 /* ========================================================================= */
-
-/**
- * @brief Enable or disable line-following steering authority.
- */
 void motion_set_mode_line_following(bool is_enabled);
-
-/**
- * @brief Provide latest steering offset directly to the 10 ms PID loop.
- * @param[in] steering_correction  Signed steering error (-128 to +127).
- */
 void motion_update_steering(int8_t steering_correction);
 
 /* ========================================================================= */
-/* 4. Sensor / Odometry APIs (Called by Barcode, IMU, and Telemetry)         */
+/* 4. Sensor & Telemetry APIs (Called by Buddy 1 Telemetry, IMU, Barcode)   */
 /* ========================================================================= */
-
-/**
- * @brief Get an atomic snapshot of cumulative wheel encoder ticks.
- */
 void motion_get_odometry(int32_t *p_left_ticks, int32_t *p_right_ticks);
+void motion_reset_odometry(void);
 
 /**
- * @brief Reset cumulative tick counters back to zero.
+ * @brief Thread-safe atomic read of the 4-byte CR1 bit-packed motion telemetry.
+ * @param[out] p_out_status Pointer to user-allocated struct to receive snapshot.
  */
-void motion_reset_odometry(void);
+void motion_get_status(motion_status_packed_t *p_out_status);
 
 #endif /* SUBSYSTEM2_H */

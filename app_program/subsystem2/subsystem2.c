@@ -17,7 +17,8 @@
 #define FLAG_STOPPED_CONFIRMED (0x00000002u)
 #define FLAG_MOVEMENT_COMPLETE (0x00000004u)
 
-#define DEBUG_MOTION_HEARTBEAT (0) /* Set to 1 only during standalone bench testing */
+/* Diagnostic print switch: set to 1 for bench testing, 0 for deployment */
+#define DEBUG_MOTION_HEARTBEAT (0)
 
 /* ------------------------------------------------------------------------- */
 /* Compatibility Handles for Subsystems 3 & 4                                */
@@ -38,6 +39,9 @@ static volatile int8_t s_latest_steering_offset = 0;
 static volatile bool s_line_mode_authorized = false;
 static int32_t s_manoeuvre_target_ticks = 0;
 static int32_t s_manoeuvre_accumulated = 0;
+
+/* Static instance storing latest telemetry status for Buddy 1 */
+static motion_status_packed_t s_latest_motion_status = {0};
 
 /* ========================================================================= */
 /* Public Procedural API Implementations                                     */
@@ -131,6 +135,14 @@ void motion_reset_odometry(void)
 	drv_encoder_reset();
 }
 
+void motion_get_status(motion_status_packed_t *p_out_status)
+{
+	if (p_out_status != NULL)
+	{
+		*p_out_status = s_latest_motion_status;
+	}
+}
+
 /* ========================================================================= */
 /* 10 ms Periodic Motion Task Loop                                           */
 /* ========================================================================= */
@@ -141,10 +153,10 @@ static void motion_control_task(INT stacd, void *p_exinf)
 
 	int32_t last_l = 0, last_r = 0;
 	int32_t integ_l = 0, integ_r = 0;
+	int32_t curr_l = 0, curr_r = 0;
 	uint32_t brake_timer = 0u;
 
 #if DEBUG_MOTION_HEARTBEAT
-	int32_t curr_l = 0, curr_r = 0;
 	uint32_t heartbeat = 0u;
 #endif
 
@@ -155,7 +167,6 @@ static void motion_control_task(INT stacd, void *p_exinf)
 	{
 		tk_dly_tsk(10); /* 10 ms hard real-time period */
 
-		int32_t curr_l = 0, curr_r = 0;
 		drv_encoder_get_snapshot(&curr_l, &curr_r);
 
 		const int8_t delta_l = (int8_t)(curr_l - last_l);
@@ -164,7 +175,6 @@ static void motion_control_task(INT stacd, void *p_exinf)
 		last_r = curr_r;
 
 #if DEBUG_MOTION_HEARTBEAT
-		/* Heartbeat print once every second (100 * 10 ms = 1000 ms) */
 		if (++heartbeat >= 100u)
 		{
 			heartbeat = 0u;
@@ -172,9 +182,7 @@ static void motion_control_task(INT stacd, void *p_exinf)
 		}
 #endif
 
-		/* ----------------------------------------------------------------- */
-		/* Check for Emergency Stop (Non-blocking poll via TMO_POL)          */
-		/* ----------------------------------------------------------------- */
+		/* Check for Emergency Stop (Non-blocking poll via TMO_POL) */
 		UINT flgptn = 0u;
 		if ((s_flg_motion > 0) &&
 			(tk_wai_flg(s_flg_motion, FLAG_STOP_REQUEST, TWF_ANDW | TWF_CLR, &flgptn, TMO_POL) == E_OK))
@@ -193,7 +201,6 @@ static void motion_control_task(INT stacd, void *p_exinf)
 
 			motion_command_packed_t cmd;
 			INT rcv_len = 0;
-			/* Non-blocking receive from command buffer via TMO_POL */
 			if (s_mbf_motion_cmds > 0)
 			{
 				rcv_len = tk_rcv_mbf(s_mbf_motion_cmds, (void *)&cmd, TMO_POL);
@@ -284,6 +291,26 @@ static void motion_control_task(INT stacd, void *p_exinf)
 			drv_motor_brake();
 			break;
 		}
+
+		/* ----------------------------------------------------------------- */
+		/* Update 4-byte packed telemetry status instance for Buddy 1        */
+		/* ----------------------------------------------------------------- */
+		motion_status_packed_t stat = {0};
+		stat.state = (uint8_t)s_current_state;
+		stat.left_motor_mode = (s_current_state == MOTION_STATE_STOPPING ||
+								s_current_state == MOTION_STATE_STOPPED)
+								   ? (uint8_t)MOTOR_MODE_ACTIVE_BRAKE
+								   : (uint8_t)MOTOR_MODE_FORWARD;
+		stat.right_motor_mode = stat.left_motor_mode;
+		stat.motor_stall_fault = 0u;
+		stat.left_delta_ticks = delta_l;
+		stat.right_delta_ticks = delta_r;
+		stat.encoder_fault = 0u;
+		stat.stop_timeout_fault = (s_current_state == MOTION_STATE_FAULT) ? 1u : 0u;
+		stat.line_mode_en = s_line_mode_authorized ? 1u : 0u;
+		stat.reserved = 0u;
+
+		s_latest_motion_status = stat;
 	}
 }
 
@@ -292,21 +319,18 @@ static void motion_control_task(INT stacd, void *p_exinf)
 /* ========================================================================= */
 EXPORT ER subsystem2_init(void)
 {
-	/* 1. Motion Command IPC */
 	T_CFLG cflg = {.flgatr = TA_TFIFO | TA_WMUL, .iflgptn = 0u};
 	s_flg_motion = tk_cre_flg(&cflg);
 
 	T_CMBF cmbf = {.mbfatr = TA_TFIFO, .bufsz = 64, .maxmsz = sizeof(motion_command_packed_t)};
 	s_mbf_motion_cmds = tk_cre_mbf(&cmbf);
 
-	/* 2. Compatibility IPC for Subsystems 3 & 4 */
 	T_CSEM csem = {.sematr = TA_TFIFO, .isemcnt = S2_POOL_COUNT, .maxsem = S2_POOL_COUNT};
 	sem_slots = tk_cre_sem(&csem);
 
 	T_CMPF cmpf = {.mpfatr = TA_TFIFO | TA_RNG3, .mpfcnt = S2_POOL_COUNT, .blfsz = sizeof(SAMPLE_MSG)};
 	mpf_samples = tk_cre_mpf(&cmpf);
 
-	/* 3. Launch Motion Task */
 	s_tskid_motion = app_start_task(motion_control_task, 2, TP_PRC1, "motion_task");
 	return (s_tskid_motion > 0) ? E_OK : E_SYS;
 }
