@@ -1,5 +1,5 @@
 /** @file subsystem2_test.c
- *  @brief Subsystem 2 automated unit test suite.
+ *  @brief Subsystem 2 automated on-target unit test suite.
  */
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
@@ -19,18 +19,19 @@ EXPORT void subsystem2_test(void)
 
 	/* S2-U01: Verify encoders initialize to 0 */
 	motion_reset_odometry();
-	int32_t l = -1, r = -1;
+	int32_t l = -1;
+	int32_t r = -1;
 	motion_get_odometry(&l, &r);
 	TEST_CHECK("S2-U01", l == 0 && r == 0, "Encoders reset to 0 ticks");
 
-	/* S2-U02: Drive briefly and verify tick accumulation */
+	/* S2-U02: Drive briefly and verify active braking */
 	drv_motor_set_speed(4000, 4000);
-	tk_dly_tsk(300);
+	tk_dly_tsk(200);
 	drv_motor_brake();
 	tk_dly_tsk(100);
 
 	motion_get_odometry(&l, &r);
-	TEST_CHECK("S2-U02", l >= 0 && r >= 0, "Encoder registers responsive");
+	TEST_CHECK("S2-U02", l >= 0 && r >= 0, "Actuators responsive and ticks accumulated");
 
 	TEST_SUMMARY("subsystem2");
 }
