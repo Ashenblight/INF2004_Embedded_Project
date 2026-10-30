@@ -31,9 +31,11 @@
 #define MQTT_UTK_TX_RETRY_MS    1000
 /* Buddy 1: Temporary topic for testing incoming MQTT messages */
 #define MQTT_UTK_RX_TEST_TOPIC "mtk3smp-pico/cmd/test"
+/* Buddy 1: Separate topic for outgoing binary telemetry */
+#define MQTT_UTK_TELEMETRY_TOPIC "mtk3smp-pico/telemetry"
 /* Inbound message staging. A publish arrives as one topic callback followed by
  * one or more data callbacks, so the topic has to be kept until the fragment
- * carrying MQTT_DATA_FLAG_LAST shows up. Both buffers are sized well past the
+ * carrying MQTT_DAT#define MQTT_UTK_TELEMETRY_TOPIC "mtk3smp-pico/telemetry"A_FLAG_LAST shows up. Both buffers are sized well past the
  * heartbeat this demo publishes; anything longer is truncated and flagged
  * rather than being allowed to run off the end. */
 #define MQTT_UTK_RX_TOPIC_MAX   64
@@ -348,10 +350,10 @@ void mqtt_utk_poll_tx(void)
     /* Hand the pending message to MQTT */
     tx_publish_busy = 1;
 
-    err = mqtt_publish(client, MQTT_TOPIC,
-                       tx_pending, (u16_t)tx_pending_len,
-                       0, 0,
-                       bridge_publish_done_cb, NULL);
+    err = mqtt_publish(client, MQTT_UTK_TELEMETRY_TOPIC,
+                   tx_pending, (u16_t)tx_pending_len,
+                   0, 0,
+                   bridge_publish_done_cb, NULL);
 
     if (err != ERR_OK) {
 		/* Keep the message and wait 1 second before retrying */

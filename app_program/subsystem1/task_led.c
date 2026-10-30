@@ -13,6 +13,7 @@
 
 #include "subsystem1.h"
 #include "mqtt_bridge_api.h"
+#include "mqtt_packet.h"
 
 /*
  * Cyclic handler.  Runs in interrupt context, NOT as a task, so it must
@@ -47,22 +48,54 @@ EXPORT void led_task(INT stacd, void *exinf)
 		gpio_set_val(S1_LED_PIN, level);
 	}
 }
-/* Buddy 1: Temporary task for testing incoming MQTT messages */
+
+
+/* Buddy 1: Temporary task for MQTT RX and STATUS telemetry testing */
 EXPORT void mqtt_rx_test_task(INT stacd, void *exinf)
 {
     static unsigned char rx_buffer[MQTT_BRIDGE_MSG_MAX];
+    unsigned int telemetry_ticks = 0;
     int len;
 
     (void)stacd;
     (void)exinf;
 
     while (1) {
-        /* Check for one incoming MQTT message without waiting */
+        /* Phase 4: Send a test STATUS packet about every 5 seconds */
+        telemetry_ticks++;
+
+        if (telemetry_ticks >= 50U) {
+            unsigned char status_packet[MQTT_PACKET_STATUS_LENGTH] = {0};
+
+            telemetry_ticks = 0;
+
+            if (mqtt_packet_encode_status(status_packet,
+                                          sizeof(status_packet),
+                                          3, 5) == 0) {
+
+                int result = mqtt_bridge_tx_send(
+                    status_packet, sizeof(status_packet));
+
+                tm_printf((UB*)"buddy1: STATUS TX enqueue result=%d\n",
+                          result);
+            } else {
+                tm_printf((UB*)"buddy1: STATUS encoding failed\n");
+            }
+        }
+
+        /* Phase 3 and 4: Receive and validate MQTT messages */
         len = mqtt_bridge_rx_receive(rx_buffer,
                                      sizeof(rx_buffer));
 
-        if (len == 3) {
-            /* Display all three bytes for binary integrity testing */
+        if (len == 1) {
+            if (mqtt_packet_decode_stop(rx_buffer,
+                                        (unsigned int)len) == 0) {
+                tm_printf((UB*)"buddy1: VALID STOP packet received\n");
+            } else {
+                tm_printf((UB*)"buddy1: INVALID STOP packet rejected\n");
+            }
+
+        } else if (len == 3) {
             tm_printf((UB*)"buddy1: RX %d bytes: %02X %02X %02X\n",
                       len,
                       (unsigned int)rx_buffer[0],
@@ -76,7 +109,6 @@ EXPORT void mqtt_rx_test_task(INT stacd, void *exinf)
             tm_printf((UB*)"buddy1: RX receive error=%d\n", len);
         }
 
-        /* Sleep for 100 ms before checking again */
         tk_dly_tsk(100);
     }
 }
