@@ -160,12 +160,14 @@ void drv_encoder_init(void)
 
 void drv_encoder_get_snapshot(int32_t * const p_left_ticks, int32_t * const p_right_ticks)
 {
-    if (p_left_ticks != NULL && p_right_ticks != NULL) {
-        const uint32_t status = cpu_irq_disable();
-        *p_left_ticks  = s_left_ticks;
-        *p_right_ticks = s_right_ticks;
-        cpu_irq_restore(status);
+    const uint32_t status = cpu_irq_disable();
+    if (p_left_ticks != NULL) {
+        *p_left_ticks = s_left_ticks;
     }
+    if (p_right_ticks != NULL) {
+        *p_right_ticks = s_right_ticks;
+    }
+    cpu_irq_restore(status);
 }
 
 void drv_encoder_reset(void)
