@@ -53,6 +53,33 @@ static int32_t         s_manoeuvre_target_ticks = 0;
 static int32_t         s_manoeuvre_accumulated  = 0;
 static uint8_t         s_active_speed_duty      = 50u;
 
+#if APP_TEST
+/* Test helper: Pop a command directly from the private queue */
+bool test_s2_pop_cmd_queue(motion_command_packed_t *p_out)
+{
+    INT rcv_len = 0;
+    if (s_mbf_motion_cmds <= 0 || p_out == NULL) return false;
+    return (tk_prcv_mbf(s_mbf_motion_cmds, (void *)p_out, &rcv_len) == E_OK);
+}
+
+/* Test helper: Read the internal steering offset */
+int8_t test_s2_get_internal_steering_offset(void)
+{
+    return s_latest_steering_offset;
+}
+
+/* Test helper: Flush residual test messages */
+void test_s2_flush_cmd_queue(void)
+{
+    motion_command_packed_t dummy;
+    INT rcv_len = 0;
+    while (s_mbf_motion_cmds > 0 &&
+           tk_prcv_mbf(s_mbf_motion_cmds, (void *)&dummy, &rcv_len) == E_OK) {
+        /* Discard */
+    }
+}
+#endif
+
 /* ========================================================================= */
 /* Procedural API Implementations                                            */
 /* ========================================================================= */
@@ -151,6 +178,7 @@ void motion_clear_emergency_stop(void)
 void motion_set_mode_line_following(bool is_enabled)
 {
     s_line_mode_authorized = is_enabled;
+    s_latest_motion_status.line_mode_en = is_enabled ? 1u : 0u;
     if (!is_enabled) {
         s_latest_steering_offset = 0; /* Zero stale offset immediately */
     }
