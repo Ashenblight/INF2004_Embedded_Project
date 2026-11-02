@@ -1,13 +1,15 @@
 /**
  * @file subsystem2_test.c
- * @brief Comprehensive On-Target Unit Test Suite for Subsystem 2 (Motion Control).
+ * @brief Formal, Strictly Granular Unit Test Suite for Subsystem 2 (Motion Control).
  *
- * Validates all internal drivers, CR1 bit-packed representation, state machine logic,
- * error clamping, and public APIs consumed by Subsystems 1, 3, 4, and 5.
+ * Adheres strictly to the SIT Formal Testing Methodology (Workload -> SUT -> Oracle -> Match).
+ * Exactly ONE isolated assertion per test ID. Zero bundled checks. Zero hardcoded passes.
+ * Inspects real hardware registers, queue payloads, and internal safety latches.
  *
  * INF2004 Embedded Systems Programming - Subsystem 2 (Aldric)
  */
 
+#include <string.h>
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include "../app.h"
@@ -18,255 +20,555 @@
 
 #if APP_TEST
 
-/* Simulated Gray Code Transition Helper for S2-U08 */
-#define TEST_PIN_ENC_LEFT_A   (1U)
-#define TEST_PIN_ENC_LEFT_B   (3U)
+/* Memory-Mapped Hardware Register Addresses for RP2040 White-Box Inspection */
+#define RP2040_PWM_BASE         (0x40050000UL)
+#define TEST_REG_PWM_CH4_CSR    (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x50UL))
+#define TEST_REG_PWM_CH4_CC     (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x5CUL))
+#define TEST_REG_PWM_CH5_CSR    (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x64UL))
+#define TEST_REG_PWM_CH5_CC     (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x70UL))
+
+/* White-box access to Subsystem 2 module-internal variables */
+IMPORT ID              s_mbf_motion_cmds;
+IMPORT volatile int8_t s_latest_steering_offset;
+
+/* Test Sandbox Helper: Empties command buffer */
+static void test_flush_queue(void)
+{
+    motion_command_packed_t dummy;
+    INT rcv_len = 0;
+    while (s_mbf_motion_cmds > 0 &&
+           tk_prcv_mbf(s_mbf_motion_cmds, (void *)&dummy, &rcv_len) == E_OK) {
+        /* Discard */
+    }
+}
+
+/* Test Sandbox Helper: Pops exactly one queued command payload */
+static motion_command_packed_t test_pop_queue(void)
+{
+    motion_command_packed_t cmd = {0};
+    INT rcv_len = 0;
+    if (s_mbf_motion_cmds > 0) {
+        tk_prcv_mbf(s_mbf_motion_cmds, (void *)&cmd, &rcv_len);
+    }
+    return cmd;
+}
 
 EXPORT void subsystem2_test(void)
 {
     TEST_INIT();
+    test_flush_queue();
 
     /* ===================================================================== */
-    /* GROUP 1: Change Requirement 1 (CR1) Bit-Packing & Type Sizes          */
+    /* GROUP 1: Change Requirement 1 (CR1) Memory Footprint & Layout         */
     /* ===================================================================== */
 
-    /* S2-U01: Verify CR1 command struct size is exactly 4 bytes (32 bits) */
+    /* S2-U01: Verify CR1 command word memory footprint */
     TEST_CHECK("S2-U01",
                sizeof(motion_command_packed_t) == 4u,
-               "CR1 motion_command_packed_t is exactly 4 bytes");
+               "CR1 motion_command_packed_t compiles to exactly 4 bytes (32 bits)");
 
-    /* S2-U02: Verify CR1 status telemetry struct size is exactly 4 bytes */
+    /* S2-U02: Verify CR1 status telemetry struct memory footprint */
     TEST_CHECK("S2-U02",
                sizeof(motion_status_packed_t) == 4u,
-               "CR1 motion_status_packed_t is exactly 4 bytes");
+               "CR1 motion_status_packed_t compiles to exactly 4 bytes (32 bits)");
 
-    /* S2-U03: Verify Command Bitfield Boundaries and Signed Packing */
+    /* S2-U03: Verify 9-bit signed angle boundary in packed struct (-180 deg) */
     {
-        motion_command_packed_t cmd = {0};
-        cmd.cmd_type           = (uint32_t)MOTION_CMD_POINT_TURN;
-        cmd.speed_duty         = 75u;
-        cmd.target_angle_deg   = -90;  /* 9-bit signed field (-180 to +180) */
-        cmd.target_distance_mm = 500u; /* 10-bit unsigned field (0 to 1023) */
-        cmd.reserved           = 0u;
-
+        motion_command_packed_t c = {0};
+        c.target_angle_deg = -180;
         TEST_CHECK("S2-U03",
-                   (cmd.cmd_type == (uint32_t)MOTION_CMD_POINT_TURN) &&
-                   (cmd.speed_duty == 75u) &&
-                   (cmd.target_angle_deg == -90) &&
-                   (cmd.target_distance_mm == 500u),
-                   "CR1 command bitfield values preserve signed ranges without corruption");
+                   c.target_angle_deg == -180,
+                   "CR1 command struct retains signed negative angle boundary (-180 deg)");
     }
 
-    /* S2-U04: Verify Status Bitfield Signed Delta Packing */
+    /* S2-U04: Verify 10-bit distance boundary in packed struct (1023 mm) */
     {
-        motion_status_packed_t stat = {0};
-        stat.state              = (uint8_t)MOTION_STATE_CONTINUOUS;
-        stat.left_motor_mode    = (uint8_t)MOTOR_MODE_FORWARD;
-        stat.right_motor_mode   = (uint8_t)MOTOR_MODE_FORWARD;
-        stat.motor_stall_fault  = 0u;
-        stat.left_delta_ticks   = -14; /* 8-bit signed delta */
-        stat.right_delta_ticks  = 14;  /* 8-bit signed delta */
-        stat.encoder_fault      = 0u;
-        stat.stop_timeout_fault = 0u;
-        stat.line_mode_en       = 1u;
-        stat.reserved           = 0u;
-
+        motion_command_packed_t c = {0};
+        c.target_distance_mm = 1023u;
         TEST_CHECK("S2-U04",
-                   (stat.state == (uint8_t)MOTION_STATE_CONTINUOUS) &&
-                   (stat.left_delta_ticks == -14) &&
-                   (stat.right_delta_ticks == 14) &&
-                   (stat.line_mode_en == 1u),
-                   "CR1 status bitfield preserves signed 8-bit deltas and flag alignments");
+                   c.target_distance_mm == 1023u,
+                   "CR1 command struct retains full 10-bit unsigned distance (1023 mm)");
     }
 
     /* ===================================================================== */
-    /* GROUP 2: Lifecycle Initialization & Compatibility Handles             */
+    /* GROUP 2: μT-Kernel Compatibility Handles (Subsystems 3 & 4 Linkage)   */
     /* ===================================================================== */
 
-    /* Ensure subsystem2 kernel objects and hardware drivers are initialized */
-    ER er_init = subsystem2_init();
-    TEST_CHECK("S2-U05", er_init == E_OK, "subsystem2_init completes successfully");
+    /* S2-U05: Verify compatibility semaphore allocation */
+    TEST_CHECK("S2-U05",
+               sem_slots > 0,
+               "Compatibility handle sem_slots successfully allocated by kernel");
 
-    /* S2-U06: Compatibility IPC handles for Subsystems 3 and 4 */
+    /* S2-U06: Verify compatibility memory pool allocation */
     TEST_CHECK("S2-U06",
-               (sem_slots > 0) && (mpf_samples > 0),
-               "Compatibility handles (sem_slots, mpf_samples) allocated and valid");
+               mpf_samples > 0,
+               "Compatibility memory pool mpf_samples successfully allocated by kernel");
 
     /* ===================================================================== */
-    /* GROUP 3: Low-Level Hardware Drivers (Encoder & Motor)                 */
+    /* GROUP 3: Encoder Driver Granular Verification (drv_encoder.c)         */
     /* ===================================================================== */
 
-    /* S2-U07: Encoder Counter Reset & Atomic Snapshot */
+    /* S2-U07: Verify Left encoder counter zeroes on reset */
     {
-        int32_t left_ticks = -99;
-        int32_t right_ticks = -99;
+        int32_t l = -1, r = -1;
         drv_encoder_reset();
-        drv_encoder_get_snapshot(&left_ticks, &right_ticks);
-
-        TEST_CHECK("S2-U07",
-                   (left_ticks == 0) && (right_ticks == 0),
-                   "drv_encoder_reset zeroes tick counters atomically");
+        drv_encoder_get_snapshot(&l, &r);
+        TEST_CHECK("S2-U07", l == 0, "drv_encoder_reset resets Left tick counter to 0");
     }
 
-    /* S2-U08: Shared GPIO ISR Edge Dispatcher Simulation */
+    /* S2-U08: Verify Right encoder counter zeroes on reset */
     {
-        int32_t initial_l = 0, initial_r = 0;
-        drv_encoder_get_snapshot(&initial_l, &initial_r);
-
-        /* Simulate quadrature edge callback invocation */
-        gpio_shared_irq_callback(TEST_PIN_ENC_LEFT_A, 0x08u);
-
-        int32_t post_l = 0, post_r = 0;
-        drv_encoder_get_snapshot(&post_l, &post_r);
-
-        /* Counter should process Gray lookup without freezing or throwing faults */
-        TEST_CHECK("S2-U08",
-                   (post_l >= initial_l - 1) && (post_l <= initial_l + 1),
-                   "gpio_shared_irq_callback executes deterministic quadrature transitions");
+        int32_t l = -1, r = -1;
+        drv_encoder_reset();
+        drv_encoder_get_snapshot(&l, &r);
+        TEST_CHECK("S2-U08", r == 0, "drv_encoder_reset resets Right tick counter to 0");
     }
 
-    /* S2-U09: Motor Driver Initialization & Safe Parking */
-    drv_motor_init();
-    drv_motor_coast();
-    drv_motor_brake();
-    TEST_CHECK("S2-U09", true, "drv_motor init, coast, and active brake configure registers safely");
-
-    /* S2-U10: Motor Speed PWM Clamping Boundary Check */
-    /* Inputs exceeding 12500 wrap count must be clamped without integer overflow */
-    drv_motor_set_speed(15000, -15000);
-    drv_motor_set_speed(0, 0);
-    drv_motor_brake();
-    TEST_CHECK("S2-U10", true, "drv_motor_set_speed saturates at wrap limits without register fault");
-
-    /* ===================================================================== */
-    /* GROUP 4: Public APIs Provided to Subsystem 5 (Vehicle Controller)     */
-    /* ===================================================================== */
-
-    /* S2-U11: Enqueue Straight Forward Manoeuvre */
-    motion_clear_emergency_stop();
-    ER er_cmd = motion_move_forward(200u, 60u);
-    TEST_CHECK("S2-U11", er_cmd == E_OK, "motion_move_forward enqueues valid distance command");
-
-    /* S2-U12: Enqueue Straight Reverse Manoeuvre */
-    er_cmd = motion_move_backward(150u, 50u);
-    TEST_CHECK("S2-U12", er_cmd == E_OK, "motion_move_backward enqueues valid reverse command");
-
-    /* S2-U13: Enqueue In-Place Differential Point Turns */
-    ER er_turn_cw  = motion_point_turn(90, 40u);
-    ER er_turn_ccw = motion_point_turn(-90, 40u);
-    TEST_CHECK("S2-U13",
-               (er_turn_cw == E_OK) && (er_turn_ccw == E_OK),
-               "motion_point_turn enqueues both positive (CW) and negative (CCW) turns");
-
-    /* S2-U14: Enqueue Continuous Cruise & Normal Stop */
-    ER er_cont = motion_start_continuous(60u);
-    ER er_stop = motion_stop();
-    TEST_CHECK("S2-U14",
-               (er_cont == E_OK) && (er_stop == E_OK),
-               "motion_start_continuous and motion_stop enqueue valid operational states");
-
-    /* S2-U15: Shorthand Convenience Macros */
-    ER er_macro1 = motion_move_fwd(100u);
-    ER er_macro2 = motion_move_bwd(100u);
-    ER er_macro3 = motion_turn_left(45);
-    ER er_macro4 = motion_turn_right(45);
-    TEST_CHECK("S2-U15",
-               (er_macro1 == E_OK) && (er_macro2 == E_OK) &&
-               (er_macro3 == E_OK) && (er_macro4 == E_OK),
-               "Shorthand macros (fwd, bwd, turn_left, turn_right) execute cleanly");
-
-    /* S2-U16: Emergency Stop Preemption & Safety Interlock Latching */
-    motion_emergency_stop();
-    ER er_blocked = motion_move_forward(100u, 50u);
-    TEST_CHECK("S2-U16",
-               er_blocked == E_SYS,
-               "motion_emergency_stop blocks new motion commands (returns E_SYS)");
-
-    /* S2-U17: Emergency Stop Recovery & Queue Clearance */
-    motion_clear_emergency_stop();
-    ER er_restored = motion_move_forward(100u, 50u);
-    TEST_CHECK("S2-U17",
-               er_restored == E_OK,
-               "motion_clear_emergency_stop unlatches safety lock and restores acceptance");
-
-    /* ===================================================================== */
-    /* GROUP 5: Public APIs Provided to Subsystem 3 (Line Following/Barcode) */
-    /* ===================================================================== */
-
-    /* S2-U18: Line Following Mode-Gating and Stale Steering Clearance */
-    motion_set_mode_line_following(true);
-    motion_update_steering(25);
-    motion_set_mode_line_following(false); /* Disabling must zero latest offset */
-    motion_update_steering(40);            /* Rejected when line mode is disabled */
-
-    motion_status_packed_t status_check = {0};
-    motion_get_status(&status_check);
-    TEST_CHECK("S2-U18",
-               status_check.line_mode_en == 0u,
-               "motion_set_mode_line_following zeroes stale offsets and locks out steering");
-
-    /* S2-U19: Odometry Snapshot Alias Consistency */
+    /* S2-U09: Odometry snapshot alias consistency (Left Ticks) */
     {
-        int32_t ticks_api_l = -1, ticks_api_r = -1;
-        int32_t ticks_macro_l = -2, ticks_macro_r = -2;
+        int32_t dir_l = -1, dir_r = -1;
+        int32_t ali_l = -2, ali_r = -2;
+        motion_get_odometry(&dir_l, &dir_r);
+        odometry_get_snapshot(&ali_l, &ali_r);
+        TEST_CHECK("S2-U09",
+                   dir_l == ali_l,
+                   "odometry_get_snapshot macro matches motion_get_odometry Left ticks");
+    }
 
-        motion_get_odometry(&ticks_api_l, &ticks_api_r);
-        odometry_get_snapshot(&ticks_macro_l, &ticks_macro_r);
-
-        TEST_CHECK("S2-U19",
-                   (ticks_api_l == ticks_macro_l) && (ticks_api_r == ticks_macro_r),
-                   "motion_get_odometry and odometry_get_snapshot alias return identical snapshots");
+    /* S2-U10: Odometry snapshot alias consistency (Right Ticks) */
+    {
+        int32_t dir_l = -1, dir_r = -1;
+        int32_t ali_l = -2, ali_r = -2;
+        motion_get_odometry(&dir_l, &dir_r);
+        odometry_get_snapshot(&ali_l, &ali_r);
+        TEST_CHECK("S2-U10",
+                   dir_r == ali_r,
+                   "odometry_get_snapshot macro matches motion_get_odometry Right ticks");
     }
 
     /* ===================================================================== */
-    /* GROUP 6: Public APIs Provided to Subsystems 1 & 4 (Telemetry / IMU)   */
+    /* GROUP 4: Motor Driver Hardware Registers (drv_motor.c)                */
     /* ===================================================================== */
 
-    /* S2-U20: Telemetry Status Snapshot Acquisition */
+    /* S2-U11: Left motor active dynamic brake forces PWM compare to 0 */
     {
-        motion_status_packed_t status_out = {0};
-        motion_get_status(&status_out);
-        TEST_CHECK("S2-U20",
-                   status_out.state <= (uint8_t)MOTION_STATE_FAULT,
-                   "motion_get_status returns valid 4-byte packed telemetry struct");
-    }
-
-    /* S2-U21: Delta Tick Saturation Protection (Risk R1 Closure) */
-    {
-        /* Simulate raw delta calculations to verify bounds [-128, +127] */
-        int32_t extreme_positive_delta = 350;
-        int32_t extreme_negative_delta = -400;
-
-        int8_t clamped_pos = (extreme_positive_delta > 127) ? 127 :
-                             ((extreme_positive_delta < -128) ? -128 : (int8_t)extreme_positive_delta);
-        int8_t clamped_neg = (extreme_negative_delta > 127) ? 127 :
-                             ((extreme_negative_delta < -128) ? -128 : (int8_t)extreme_negative_delta);
-
-        TEST_CHECK("S2-U21",
-                   (clamped_pos == 127) && (clamped_neg == -128),
-                   "Delta tick calculations saturate to [-128, +127] preventing 8-bit wrap-around");
-    }
-
-    /* ===================================================================== */
-    /* GROUP 7: Actuator Hardware Pulse & Active Braking Verification        */
-    /* ===================================================================== */
-
-    /* S2-U22: Brief Physical Motor Pulse & Active Dynamic Brake */
-    {
-        drv_motor_set_speed(3000, 3000);
-        tk_dly_tsk(100); /* 100 ms pulse */
+        drv_motor_init();
+        drv_motor_set_speed(4000, 0);
         drv_motor_brake();
-        tk_dly_tsk(50);  /* Hold brake */
-
-        int32_t l_pulse = 0, r_pulse = 0;
-        motion_get_odometry(&l_pulse, &r_pulse);
-
-        TEST_CHECK("S2-U22",
-                   (l_pulse >= 0) && (r_pulse >= 0),
-                   "Actuators pulse safely and hold active dynamic brake on completion");
+        TEST_CHECK("S2-U11",
+                   TEST_REG_PWM_CH4_CC == 0UL,
+                   "drv_motor_brake sets Left Motor PWM compare (CC) to 0");
     }
 
-    /* Park motors safely */
+    /* S2-U12: Right motor active dynamic brake forces PWM compare to 0 */
+    {
+        drv_motor_init();
+        drv_motor_set_speed(0, 4000);
+        drv_motor_brake();
+        TEST_CHECK("S2-U12",
+                   TEST_REG_PWM_CH5_CC == 0UL,
+                   "drv_motor_brake sets Right Motor PWM compare (CC) to 0");
+    }
+
+    /* S2-U13: Left motor coast clears PWM slice enable bit */
+    {
+        drv_motor_init();
+        drv_motor_set_speed(4000, 0);
+        drv_motor_coast();
+        TEST_CHECK("S2-U13",
+                   (TEST_REG_PWM_CH4_CSR & 1UL) == 0UL,
+                   "drv_motor_coast clears Left Motor PWM enable bit (CSR bit 0)");
+    }
+
+    /* S2-U14: Right motor coast clears PWM slice enable bit */
+    {
+        drv_motor_init();
+        drv_motor_set_speed(0, 4000);
+        drv_motor_coast();
+        TEST_CHECK("S2-U14",
+                   (TEST_REG_PWM_CH5_CSR & 1UL) == 0UL,
+                   "drv_motor_coast clears Right Motor PWM enable bit (CSR bit 0)");
+    }
+
+    /* S2-U15: Left motor forward polarity routes to IN1 */
+    {
+        drv_motor_init();
+        drv_motor_set_speed(4500, 0);
+        uint16_t in1 = (uint16_t)(TEST_REG_PWM_CH4_CC & 0xFFFFUL);
+        TEST_CHECK("S2-U15", in1 == 4500, "Left forward speed routes duty cycle to IN1");
+    }
+
+    /* S2-U16: Left motor forward polarity grounds IN2 */
+    {
+        uint16_t in2 = (uint16_t)((TEST_REG_PWM_CH4_CC >> 16U) & 0xFFFFUL);
+        TEST_CHECK("S2-U16", in2 == 0, "Left forward speed grounds IN2 to 0");
+    }
+
+    /* S2-U17: Left motor reverse polarity grounds IN1 */
+    {
+        drv_motor_set_speed(-4500, 0);
+        uint16_t in1 = (uint16_t)(TEST_REG_PWM_CH4_CC & 0xFFFFUL);
+        TEST_CHECK("S2-U17", in1 == 0, "Left reverse speed grounds IN1 to 0");
+    }
+
+    /* S2-U18: Left motor reverse polarity routes to IN2 */
+    {
+        uint16_t in2 = (uint16_t)((TEST_REG_PWM_CH4_CC >> 16U) & 0xFFFFUL);
+        TEST_CHECK("S2-U18", in2 == 4500, "Left reverse speed routes duty cycle to IN2");
+    }
+
+    /* S2-U19: Right motor forward polarity routes to IN1 */
+    {
+        drv_motor_set_speed(0, 4500);
+        uint16_t in1 = (uint16_t)(TEST_REG_PWM_CH5_CC & 0xFFFFUL);
+        TEST_CHECK("S2-U19", in1 == 4500, "Right forward speed routes duty cycle to IN1");
+    }
+
+    /* S2-U20: Right motor forward polarity grounds IN2 */
+    {
+        uint16_t in2 = (uint16_t)((TEST_REG_PWM_CH5_CC >> 16U) & 0xFFFFUL);
+        TEST_CHECK("S2-U20", in2 == 0, "Right forward speed grounds IN2 to 0");
+    }
+
+    /* S2-U21: Right motor reverse polarity grounds IN1 */
+    {
+        drv_motor_set_speed(0, -4500);
+        uint16_t in1 = (uint16_t)(TEST_REG_PWM_CH5_CC & 0xFFFFUL);
+        TEST_CHECK("S2-U21", in1 == 0, "Right reverse speed grounds IN1 to 0");
+    }
+
+    /* S2-U22: Right motor reverse polarity routes to IN2 */
+    {
+        uint16_t in2 = (uint16_t)((TEST_REG_PWM_CH5_CC >> 16U) & 0xFFFFUL);
+        TEST_CHECK("S2-U22", in2 == 4500, "Right reverse speed routes duty cycle to IN2");
+    }
+
+    /* S2-U23: Left motor wrap saturation clamping */
+    {
+        drv_motor_set_speed(30000, 0);
+        uint16_t duty = (uint16_t)(TEST_REG_PWM_CH4_CC & 0xFFFFUL);
+        TEST_CHECK("S2-U23",
+                   duty == MOTOR_PWM_WRAP_COUNT,
+                   "Left motor duty clamps at MOTOR_PWM_WRAP_COUNT (12500)");
+    }
+
+    /* S2-U24: Right motor wrap saturation clamping */
+    {
+        drv_motor_set_speed(0, 30000);
+        uint16_t duty = (uint16_t)(TEST_REG_PWM_CH5_CC & 0xFFFFUL);
+        TEST_CHECK("S2-U24",
+                   duty == MOTOR_PWM_WRAP_COUNT,
+                   "Right motor duty clamps at MOTOR_PWM_WRAP_COUNT (12500)");
+        drv_motor_brake();
+    }
+
+    /* ===================================================================== */
+    /* GROUP 5: Procedural Motion API Enqueuing & Payload Verifications      */
+    /* ===================================================================== */
+
+    /* S2-U25: motion_move_forward packs DRIVE_DISTANCE command type */
+    {
+        test_flush_queue();
+        motion_move_forward(200u, 55u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U25",
+                   cmd.cmd_type == (uint32_t)MOTION_CMD_DRIVE_DISTANCE,
+                   "motion_move_forward packs MOTION_CMD_DRIVE_DISTANCE");
+    }
+
+    /* S2-U26: motion_move_forward packs distance payload */
+    {
+        test_flush_queue();
+        motion_move_forward(200u, 55u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U26",
+                   cmd.target_distance_mm == 200u,
+                   "motion_move_forward packs target distance (200 mm)");
+    }
+
+    /* S2-U27: motion_move_forward packs speed duty */
+    {
+        test_flush_queue();
+        motion_move_forward(200u, 55u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U27",
+                   cmd.speed_duty == 55u,
+                   "motion_move_forward packs commanded speed duty (55%)");
+    }
+
+    /* S2-U28: motion_move_forward sets non-negative angle for forward direction */
+    {
+        test_flush_queue();
+        motion_move_forward(200u, 55u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U28",
+                   cmd.target_angle_deg >= 0,
+                   "motion_move_forward preserves forward direction sign");
+    }
+
+    /* S2-U29: motion_move_backward sets negative angle for reverse direction */
+    {
+        test_flush_queue();
+        motion_move_backward(150u, 50u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U29",
+                   cmd.target_angle_deg < 0,
+                   "motion_move_backward marks negative direction flag");
+    }
+
+    /* S2-U30: motion_point_turn packs POINT_TURN command type */
+    {
+        test_flush_queue();
+        motion_point_turn(90, 40u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U30",
+                   cmd.cmd_type == (uint32_t)MOTION_CMD_POINT_TURN,
+                   "motion_point_turn packs MOTION_CMD_POINT_TURN");
+    }
+
+    /* S2-U31: motion_point_turn packs signed clockwise angle */
+    {
+        test_flush_queue();
+        motion_point_turn(90, 40u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U31",
+                   cmd.target_angle_deg == 90,
+                   "motion_point_turn preserves positive CW angle (+90 deg)");
+    }
+
+    /* S2-U32: motion_point_turn packs signed counter-clockwise angle */
+    {
+        test_flush_queue();
+        motion_point_turn(-90, 40u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U32",
+                   cmd.target_angle_deg == -90,
+                   "motion_point_turn preserves negative CCW angle (-90 deg)");
+    }
+
+    /* S2-U33: motion_start_continuous packs DRIVE_CONTINUOUS */
+    {
+        test_flush_queue();
+        motion_start_continuous(65u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U33",
+                   cmd.cmd_type == (uint32_t)MOTION_CMD_DRIVE_CONTINUOUS,
+                   "motion_start_continuous packs MOTION_CMD_DRIVE_CONTINUOUS");
+    }
+
+    /* S2-U34: motion_stop packs MOTION_CMD_STOP */
+    {
+        test_flush_queue();
+        motion_stop();
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U34",
+                   cmd.cmd_type == (uint32_t)MOTION_CMD_STOP,
+                   "motion_stop packs MOTION_CMD_STOP");
+        test_flush_queue();
+    }
+
+    /* ===================================================================== */
+    /* GROUP 6: Shorthand Convenience Macros Payload Verification            */
+    /* ===================================================================== */
+
+    /* S2-U35: motion_move_fwd defaults to 60% speed duty */
+    {
+        test_flush_queue();
+        motion_move_fwd(100u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U35",
+                   cmd.speed_duty == 60u,
+                   "Macro motion_move_fwd assigns default 60% cruise duty");
+    }
+
+    /* S2-U36: motion_move_bwd defaults to 60% speed duty */
+    {
+        test_flush_queue();
+        motion_move_bwd(100u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U36",
+                   cmd.speed_duty == 60u,
+                   "Macro motion_move_bwd assigns default 60% reverse duty");
+    }
+
+    /* S2-U37: motion_turn_left negates angle */
+    {
+        test_flush_queue();
+        motion_turn_left(45);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U37",
+                   cmd.target_angle_deg == -45,
+                   "Macro motion_turn_left converts angle to negative value (-45 deg)");
+    }
+
+    /* S2-U38: motion_turn_right preserves positive angle */
+    {
+        test_flush_queue();
+        motion_turn_right(45);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U38",
+                   cmd.target_angle_deg == 45,
+                   "Macro motion_turn_right preserves positive angle (+45 deg)");
+        test_flush_queue();
+    }
+
+    /* ===================================================================== */
+    /* GROUP 7: Emergency Stop Interlock & Recovery FSM                      */
+    /* ===================================================================== */
+
+    /* S2-U39: Emergency stop locks out subsequent movement commands */
+    {
+        motion_emergency_stop();
+        ER er = motion_move_forward(50u, 50u);
+        TEST_CHECK("S2-U39",
+                   er == E_SYS,
+                   "motion_emergency_stop locks out commands and returns E_SYS");
+    }
+
+    /* S2-U40: Emergency stop clear restores command acceptance */
+    {
+        motion_clear_emergency_stop();
+        ER er = motion_move_forward(50u, 50u);
+        TEST_CHECK("S2-U40",
+                   er == E_OK,
+                   "motion_clear_emergency_stop unlocks interlock and returns E_OK");
+        test_flush_queue();
+    }
+
+    /* ===================================================================== */
+    /* GROUP 8: Line-Following Mode-Gating (Subsystem 3 Contract)            */
+    /* ===================================================================== */
+
+    /* S2-U41: Enabling line following sets telemetry flag to 1 */
+    {
+        motion_set_mode_line_following(true);
+        motion_status_packed_t stat = {0};
+        motion_get_status(&stat);
+        TEST_CHECK("S2-U41",
+                   stat.line_mode_en == 1u,
+                   "motion_set_mode_line_following(true) sets line_mode_en telemetry bit");
+    }
+
+    /* S2-U42: Disabling line following clears telemetry flag to 0 */
+    {
+        motion_set_mode_line_following(false);
+        motion_status_packed_t stat = {0};
+        motion_get_status(&stat);
+        TEST_CHECK("S2-U42",
+                   stat.line_mode_en == 0u,
+                   "motion_set_mode_line_following(false) clears line_mode_en telemetry bit");
+    }
+
+    /* S2-U43: Disabling line following actively zeroes residual steering offset */
+    {
+        motion_set_mode_line_following(true);
+        motion_update_steering(35);
+        motion_set_mode_line_following(false);
+        TEST_CHECK("S2-U43",
+                   s_latest_steering_offset == 0,
+                   "motion_set_mode_line_following(false) actively zeroes s_latest_steering_offset");
+    }
+
+    /* S2-U44: Steering updates rejected when line-following mode is disabled */
+    {
+        motion_set_mode_line_following(false);
+        motion_update_steering(45);
+        TEST_CHECK("S2-U44",
+                   s_latest_steering_offset == 0,
+                   "motion_update_steering is ignored when line following is deauthorized");
+    }
+
+    /* ===================================================================== */
+    /* GROUP 9: Robustness & Defensive Input Clamping (SIT Lecture Slide 3)  */
+    /* ===================================================================== */
+
+    /* S2-U45: Speed duty over-range clamping (>100% clamps to 100%) */
+    {
+        test_flush_queue();
+        motion_move_forward(100u, 250u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U45",
+                   cmd.speed_duty == 100u,
+                   "Over-range speed_duty (250%) clamps to maximum 100%");
+    }
+
+    /* S2-U46: Distance over-range clamping (>1023 mm clamps to 1023 mm) */
+    {
+        test_flush_queue();
+        motion_move_forward(5000u, 50u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U46",
+                   cmd.target_distance_mm == 1023u,
+                   "Over-range distance (5000 mm) clamps to 10-bit max (1023 mm)");
+    }
+
+    /* S2-U47: Point turn positive angle clamping (>180 deg clamps to +180 deg) */
+    {
+        test_flush_queue();
+        motion_point_turn(360, 40u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U47",
+                   cmd.target_angle_deg == 180,
+                   "Over-range positive angle (+360 deg) clamps to +180 deg");
+    }
+
+    /* S2-U48: Point turn negative angle clamping (<-180 deg clamps to -180 deg) */
+    {
+        test_flush_queue();
+        motion_point_turn(-360, 40u);
+        motion_command_packed_t cmd = test_pop_queue();
+        TEST_CHECK("S2-U48",
+                   cmd.target_angle_deg == -180,
+                   "Over-range negative angle (-360 deg) clamps to -180 deg");
+    }
+
+    /* S2-U49: Odometry getter handles Left valid, Right NULL */
+    {
+        int32_t val_l = -888;
+        drv_encoder_reset();
+        motion_get_odometry(&val_l, NULL);
+        TEST_CHECK("S2-U49",
+                   val_l == 0,
+                   "motion_get_odometry writes Left pointer while safely ignoring NULL Right");
+    }
+
+    /* S2-U50: Odometry getter handles Left NULL, Right valid */
+    {
+        int32_t val_r = -888;
+        drv_encoder_reset();
+        motion_get_odometry(NULL, &val_r);
+        TEST_CHECK("S2-U50",
+                   val_r == 0,
+                   "motion_get_odometry writes Right pointer while safely ignoring NULL Left");
+    }
+
+    /* S2-U51: Telemetry getter memory overwrite verification */
+    {
+        motion_status_packed_t stat_buf;
+        memset(&stat_buf, 0xFF, sizeof(stat_buf)); /* Poison with 0xFF */
+        motion_get_status(&stat_buf);
+        TEST_CHECK("S2-U51",
+                   stat_buf.reserved == 0u,
+                   "motion_get_status overwrites destination and zeroes reserved padding");
+    }
+
+    /* S2-U52: Command queue capacity saturation returns E_TMOUT */
+    {
+        test_flush_queue();
+        ER q_res = E_OK;
+        for (int i = 0; i < 20; i++) {
+            q_res = motion_move_forward(10u, 10u);
+            if (q_res != E_OK) {
+                break;
+            }
+        }
+        TEST_CHECK("S2-U52",
+                   q_res == E_TMOUT,
+                   "Command buffer returns E_TMOUT upon reaching queue capacity");
+        test_flush_queue();
+    }
+
+    /* Final Safety Guard: Leave motors safely parked */
     drv_motor_brake();
 
     TEST_SUMMARY("subsystem2");
