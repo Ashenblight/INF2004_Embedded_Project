@@ -69,6 +69,7 @@ static void print_manual_menu(void)
     tm_printf((UB *)"  [q]        : Quit Manual Mode -> Resume RTOS Runtime\n");
     tm_printf((UB *)"-------------------------------------------------------\n");
     tm_printf((UB *)"Tip: Rotate wheels by hand anytime to test live ticks!\n\n");
+    tm_printf((UB *)"Live heartbeat auto-updates every 500 ms below:\n\n");
 }
 
 static void manual_motor_test_shell(void)
@@ -77,6 +78,9 @@ static void manual_motor_test_shell(void)
 
     int32_t last_disp_l = -999999;
     int32_t last_disp_r = -999999;
+
+    uint32_t heartbeat_counter = 0;
+
     bool exit_shell = false;
 
     while (!exit_shell)
@@ -190,14 +194,18 @@ static void manual_motor_test_shell(void)
         int32_t cur_r = 0;
         drv_encoder_get_snapshot(&cur_l, &cur_r);
 
-        if (cur_l != last_disp_l || cur_r != last_disp_r)
+        heartbeat_counter++;
+
+        /* Print every 500 ms (5 * 100ms) OR instantly when ticks change */
+        if (heartbeat_counter >= 5 || cur_l != last_disp_l || cur_r != last_disp_r)
         {
-            tm_printf((UB *)"  [TICKS] Left = %6d  |  Right = %6d\r\n", cur_l, cur_r);
+            tm_printf((UB *)"  [HEARTBEAT] Left Ticks = %6d  |  Right Ticks = %6d\n", cur_l, cur_r);
             last_disp_l = cur_l;
             last_disp_r = cur_r;
+            heartbeat_counter = 0;
         }
 
-        tk_dly_tsk(100); /* 100 ms polling cadence */
+        tk_dly_tsk(100); /* 100 ms polling cadence/loop delay */
     }
 
     drv_motor_brake();
