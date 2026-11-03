@@ -67,7 +67,7 @@ EXPORT ER knl_start_device( void )
 
 	/* I2C unit.0 "iica" */
 	#if DEVCNF_USE_IIC
-		err = dev_init_i2c(0);
+		err = dev_init_i2c(1);
 		if(err < E_OK) return err;
 	#endif
 

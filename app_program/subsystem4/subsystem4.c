@@ -1,52 +1,78 @@
-/*
- *	subsystem4.c
- *	Subsystem 4 -- Monitor: creates its objects and starts its task.
- *
- *	APIs shown: tk_cre_flg, tk_cre_mbf, tk_cre_alm
- */
-
 #include "subsystem4.h"
+#include "terrain_packet.h"
 
-EXPORT ID	mbf_summary;	/* IF-03 */
-EXPORT ID	flg_events;	/* IF-03 */
-EXPORT ID	alm_monitor;
+EXPORT ID mbf_summary;
+EXPORT ID flg_events;
+
+EXPORT ID mbf_s4_events;
+EXPORT ID flg_s4_faults;
 
 EXPORT ER subsystem4_init(void)
 {
-	T_CFLG	cflg = {0};
-	T_CMBF	cmbf = {0};
-	T_CALM	calm = {0};
+    T_CFLG cflg = {0};
+    T_CMBF cmbf = {0};
+    ER er;
 
-	/* Event flag: a 32-bit pattern of bits.  Tasks wait for a bit (or a
-	   combination of bits) to be set. */
-	cflg.flgatr  = TA_TFIFO | TA_WMUL;	/* allow several waiters */
-	cflg.iflgptn = 0;			/* all bits clear to begin with */
-	flg_events = tk_cre_flg(&cflg);
-	if (flg_events < E_OK) {
-		return flg_events;
-	}
+    /* existing event flag */
+    cflg.flgatr = TA_TFIFO | TA_WMUL;
+    cflg.iflgptn = 0;
 
-	/* Message buffer: COPIES variable-length data into a kernel ring
-	   buffer.  Here it carries short text lines from subsystem 3. */
-	cmbf.mbfatr = TA_TFIFO;
-	cmbf.bufsz  = 4 * S4_SUMMARY_MAX;	/* total buffer size, bytes */
-	cmbf.maxmsz = S4_SUMMARY_MAX;		/* largest single message */
-	mbf_summary = tk_cre_mbf(&cmbf);
-	if (mbf_summary < E_OK) {
-		return mbf_summary;
-	}
+    flg_events = tk_cre_flg(&cflg);
 
-	/* Alarm handler: called ONCE, a given time after tk_sta_alm().
-	   The monitor task re-arms it each time round its loop. */
-	calm.almatr = TA_HLNG;
-	calm.almhdr = (FP)monitor_alarm_handler;
-	alm_monitor = tk_cre_alm(&calm);
-	return (alm_monitor < E_OK) ? alm_monitor : E_OK;
+    if (flg_events < E_OK) {
+        return flg_events;
+    }
+
+    /* existing message buffer */
+    cmbf.mbfatr = TA_TFIFO;
+    cmbf.bufsz = 4 * S4_SUMMARY_MAX;
+    cmbf.maxmsz = S4_SUMMARY_MAX;
+
+    mbf_summary = tk_cre_mbf(&cmbf);
+
+    if (mbf_summary < E_OK) {
+        er = (ER)mbf_summary;
+        (void)tk_del_flg(flg_events);
+        return er;
+    }
+
+    /* packed terrain event buffer */
+    cmbf.bufsz = S4_EVENT_BUFFER_BYTES;
+    cmbf.maxmsz = S4_PACKET_EVENT_SIZE;
+
+    mbf_s4_events = tk_cre_mbf(&cmbf);
+
+    if (mbf_s4_events < E_OK) {
+        er = (ER)mbf_s4_events;
+        (void)tk_del_mbf(mbf_summary);
+        (void)tk_del_flg(flg_events);
+        return er;
+    }
+
+    /* fault event flag */
+    flg_s4_faults = tk_cre_flg(&cflg);
+
+    if (flg_s4_faults < E_OK) {
+        er = (ER)flg_s4_faults;
+        (void)tk_del_mbf(mbf_s4_events);
+        (void)tk_del_mbf(mbf_summary);
+        (void)tk_del_flg(flg_events);
+        return er;
+    }
+
+    return E_OK;
 }
 
 EXPORT ER subsystem4_start(void)
 {
-	/* No affinity: the scheduler may run it on either core */
-	ID tid = app_start_task(monitor_task, S4_PRI_MONITOR, 0, "monitor_task");
-	return (tid < E_OK) ? tid : E_OK;
+    ID tid;
+
+    tid = app_start_task(
+        monitor_task,
+        S4_PRI_MONITOR,
+        TP_PRC1,
+        "imu_monitor"
+    );
+
+    return (tid < E_OK) ? (ER)tid : E_OK;
 }
