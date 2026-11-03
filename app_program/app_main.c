@@ -4,6 +4,7 @@
  */
 
 #include "app.h"
+#include <stdint.h>
 
 EXPORT ID app_start_task(FP entry, PRI pri, UW prc, const char *name)
 {
@@ -16,7 +17,8 @@ EXPORT ID app_start_task(FP entry, PRI pri, UW prc, const char *name)
 	ctsk.stksz = TASK_STACK_SIZE;
 	ctsk.tskatr = TA_HLNG | TA_RNG3;
 #if TK_SUPPORT_SMP
-	if (prc != 0) {
+	if (prc != 0)
+	{
 		ctsk.tskatr |= TA_ASSPRC;
 		ctsk.assprc = prc;
 	}
@@ -25,7 +27,8 @@ EXPORT ID app_start_task(FP entry, PRI pri, UW prc, const char *name)
 #endif
 
 	tid = tk_cre_tsk(&ctsk);
-	if (tid < E_OK) {
+	if (tid < E_OK)
+	{
 		CHECK(tid, name);
 		return tid;
 	}
@@ -39,6 +42,10 @@ EXPORT INT usermain(void)
 {
 	T_RVER ver;
 
+	/* CRUCIAL: 3000 ms delay gives the PC time to re-enumerate the USB CDC
+	   COM port after reboot, ensuring the serial monitor catches all prints. */
+	tk_dly_tsk(3000);
+
 	tk_ref_ver(&ver);
 	tm_printf((UB *)"\n=== micro T-Kernel on Raspberry Pi Pico W"
 					" (spec 0x%04x, product 0x%04x) ===\n",
@@ -50,35 +57,28 @@ EXPORT INT usermain(void)
 	tm_printf((UB *)"single-core build\n");
 #endif
 
-	/* Phase 1: Every subsystem creates its kernel objects & configures pins */
-	CHECK(subsystem1_init(), "subsystem1_init");
+	/* Phase 1: Initialize Subsystem 2 */
 	CHECK(subsystem2_init(), "subsystem2_init");
-	CHECK(subsystem3_init(), "subsystem3_init");
-	CHECK(subsystem4_init(), "subsystem4_init");
-	CHECK(subsystem5_init(), "subsystem5_init");
 
 #if APP_TEST
-	/* Test build (make TEST=1): Run unit tests BEFORE background tasks start
-	   to avoid actuator contention and race conditions on motor PWM slices. */
 	tm_printf((UB *)"[TEST] === test run start ===\n");
-	/* subsystem1_test(); */
 	subsystem2_test();
-	/* subsystem3_test(); */
-	/* subsystem4_test(); */
-	/* subsystem5_test(); */
 	tm_printf((UB *)"[TEST] === test run end ===\n\n");
 #endif
 
-	/* Phase 2: Every subsystem starts its background RTOS tasks */
-	CHECK(subsystem1_start(), "subsystem1_start");
+	/* Phase 2: Start Subsystem 2 background tasks */
 	CHECK(subsystem2_start(), "subsystem2_start");
-	CHECK(subsystem3_start(), "subsystem3_start");
-	CHECK(subsystem4_start(), "subsystem4_start");
-	CHECK(subsystem5_start(), "subsystem5_start");
 
-	tm_printf((UB *)"all subsystems started\n\n");
+	tm_printf((UB *)"Subsystem 2 started cleanly! Entering active loop...\n\n");
 
-	/* Sleep forever. Returning from usermain() would shut down the OS. */
-	tk_slp_tsk(TMO_FEVR);
+	/* Instead of silent tk_slp_tsk, print a heartbeat every 2 seconds so
+	   you can always verify the terminal connection at any time. */
+	uint32_t count = 0;
+	while (1)
+	{
+		tk_dly_tsk(2000);
+		tm_printf((UB *)"[HEARTBEAT] Pico alive | S2 loop active (#%u)\n", ++count);
+	}
+
 	return 0;
 }

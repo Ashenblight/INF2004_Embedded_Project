@@ -1,15 +1,13 @@
 /**
  * @file subsystem2_test.c
- * @brief Formal, Strictly Granular Unit Test Suite for Subsystem 2 (Motion Control).
+ * @brief Formal Unit Test Suite & Interactive Hardware Diagnostic Shell for Subsystem 2.
  *
- * Adheres strictly to the SIT Formal Testing Methodology (Workload -> SUT -> Oracle -> Match).
- * Exactly ONE isolated assertion per test ID. Zero bundled checks. Zero hardcoded passes.
- * Inspects real hardware registers, queue payloads, and internal safety latches.
+ * Runs 52 granular unit tests, then enters an interactive manual test state
+ * to exercise real-time wheel encoders, directional drive, point turns, and active braking.
  *
  * INF2004 Embedded Systems Programming - Subsystem 2 (Aldric)
  */
 
-#include <string.h>
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include "../app.h"
@@ -21,24 +19,23 @@
 #if APP_TEST
 
 /* Memory-Mapped Hardware Register Addresses for RP2040 White-Box Inspection */
-#define RP2040_PWM_BASE         (0x40050000UL)
-#define TEST_REG_PWM_CH4_CSR    (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x50UL))
-#define TEST_REG_PWM_CH4_CC     (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x5CUL))
-#define TEST_REG_PWM_CH5_CSR    (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x64UL))
-#define TEST_REG_PWM_CH5_CC     (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x70UL))
+#define RP2040_PWM_BASE (0x40050000UL)
+#define TEST_REG_PWM_CH4_CSR (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x50UL))
+#define TEST_REG_PWM_CH4_CC (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x5CUL))
+#define TEST_REG_PWM_CH5_CSR (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x64UL))
+#define TEST_REG_PWM_CH5_CC (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x70UL))
 
 /* White-box access to Subsystem 2 module-internal variables */
-IMPORT ID              s_mbf_motion_cmds;
-IMPORT volatile int8_t s_latest_steering_offset;
+IMPORT ID s_mbf_motion_cmds;
 
 /* Test Sandbox Helper: Empties command buffer */
 static void test_flush_queue(void)
 {
     motion_command_packed_t dummy;
-    INT rcv_len = 0;
     while (s_mbf_motion_cmds > 0 &&
-           tk_prcv_mbf(s_mbf_motion_cmds, (void *)&dummy, &rcv_len) == E_OK) {
-        /* Discard */
+           tk_rcv_mbf(s_mbf_motion_cmds, (void *)&dummy, TMO_POL) > 0)
+    {
+        /* Discard lingering items */
     }
 }
 
@@ -46,13 +43,169 @@ static void test_flush_queue(void)
 static motion_command_packed_t test_pop_queue(void)
 {
     motion_command_packed_t cmd = {0};
-    INT rcv_len = 0;
-    if (s_mbf_motion_cmds > 0) {
-        tk_prcv_mbf(s_mbf_motion_cmds, (void *)&cmd, &rcv_len);
+    if (s_mbf_motion_cmds > 0)
+    {
+        tk_rcv_mbf(s_mbf_motion_cmds, (void *)&cmd, TMO_POL);
     }
     return cmd;
 }
 
+/* ========================================================================= */
+/* Interactive Manual Motor & Encoder Diagnostic Shell                       */
+/* ========================================================================= */
+static void print_manual_menu(void)
+{
+    tm_printf((UB *)"\n=======================================================\n");
+    tm_printf((UB *)"      Subsystem 2: Interactive Manual Diagnostic Menu   \n");
+    tm_printf((UB *)"=======================================================\n");
+    tm_printf((UB *)"  [w] or [1] : Move Forward  (~30%% PWM, 1.0 sec)\n");
+    tm_printf((UB *)"  [s] or [2] : Move Backward (~30%% PWM, 1.0 sec)\n");
+    tm_printf((UB *)"  [a] or [3] : Point Turn Left  (CCW, 0.6 sec)\n");
+    tm_printf((UB *)"  [d] or [4] : Point Turn Right (CW, 0.6 sec)\n");
+    tm_printf((UB *)"  [b] or [5] : Active Dynamic Brake (Lock Wheels)\n");
+    tm_printf((UB *)"  [c] or [6] : High-Z Coast (Free Wheel)\n");
+    tm_printf((UB *)"  [r]        : Reset Encoder Ticks to 0\n");
+    tm_printf((UB *)"  [h] or [?] : Show This Menu\n");
+    tm_printf((UB *)"  [q]        : Quit Manual Mode -> Resume RTOS Runtime\n");
+    tm_printf((UB *)"-------------------------------------------------------\n");
+    tm_printf((UB *)"Tip: Rotate wheels by hand anytime to test live ticks!\n\n");
+}
+
+static void manual_motor_test_shell(void)
+{
+    print_manual_menu();
+
+    int32_t last_disp_l = -999999;
+    int32_t last_disp_r = -999999;
+    bool exit_shell = false;
+
+    while (!exit_shell)
+    {
+        /* Poll keyboard without blocking (wait = 0) */
+        INT c = tm_getchar(0);
+
+        /* Print non-zero return codes to see what tm_getchar is returning */
+        if (c != 0)
+        {
+            tm_printf((UB *)"[DEBUG] tm_getchar returned: %d\n", c);
+        }
+
+        if (c > 0)
+        {
+            switch (c)
+            {
+            case 'w':
+            case '1':
+            {
+                tm_printf((UB *)"\n[CMD] Moving FORWARD (4000 PWM for 1.0s)...\n");
+                drv_motor_set_speed(4000, 4000);
+                tk_dly_tsk(1000);
+                drv_motor_brake();
+                tm_printf((UB *)"[CMD] Braked.\n");
+                break;
+            }
+
+            case 's':
+            case '2':
+            {
+                tm_printf((UB *)"\n[CMD] Moving BACKWARD (-4000 PWM for 1.0s)...\n");
+                drv_motor_set_speed(-4000, -4000);
+                tk_dly_tsk(1000);
+                drv_motor_brake();
+                tm_printf((UB *)"[CMD] Braked.\n");
+                break;
+            }
+
+            case 'a':
+            case '3':
+            {
+                tm_printf((UB *)"\n[CMD] POINT TURN LEFT (CCW for 0.6s)...\n");
+                drv_motor_set_speed(-4000, 4000);
+                tk_dly_tsk(600);
+                drv_motor_brake();
+                tm_printf((UB *)"[CMD] Braked.\n");
+                break;
+            }
+
+            case 'd':
+            case '4':
+            {
+                tm_printf((UB *)"\n[CMD] POINT TURN RIGHT (CW for 0.6s)...\n");
+                drv_motor_set_speed(4000, -4000);
+                tk_dly_tsk(600);
+                drv_motor_brake();
+                tm_printf((UB *)"[CMD] Braked.\n");
+                break;
+            }
+
+            case 'b':
+            case '5':
+            {
+                tm_printf((UB *)"\n[CMD] ACTIVE BRAKE applied (terminals grounded LOW).\n");
+                drv_motor_brake();
+                break;
+            }
+
+            case 'c':
+            case '6':
+            {
+                tm_printf((UB *)"\n[CMD] COAST mode applied (PWM slices disabled).\n");
+                drv_motor_coast();
+                break;
+            }
+
+            case 'r':
+            case 'R':
+            {
+                drv_encoder_reset();
+                last_disp_l = -999999;
+                last_disp_r = -999999;
+                tm_printf((UB *)"\n[CMD] Encoders reset to 0.\n");
+                break;
+            }
+
+            case 'h':
+            case 'H':
+            case '?':
+            {
+                print_manual_menu();
+                break;
+            }
+
+            case 'q':
+            case 'Q':
+            {
+                tm_printf((UB *)"\n[CMD] Exiting manual diagnostics shell...\n\n");
+                exit_shell = true;
+                break;
+            }
+
+            default:
+                break;
+            }
+        }
+
+        /* Continuous Live Encoder Reporting: Update line whenever ticks change or every 500 ms */
+        int32_t cur_l = 0;
+        int32_t cur_r = 0;
+        drv_encoder_get_snapshot(&cur_l, &cur_r);
+
+        if (cur_l != last_disp_l || cur_r != last_disp_r)
+        {
+            tm_printf((UB *)"  [TICKS] Left = %6d  |  Right = %6d\r\n", cur_l, cur_r);
+            last_disp_l = cur_l;
+            last_disp_r = cur_r;
+        }
+
+        tk_dly_tsk(100); /* 100 ms polling cadence */
+    }
+
+    drv_motor_brake();
+}
+
+/* ========================================================================= */
+/* Subsystem 2 Automated Test Suite Entry Point                              */
+/* ========================================================================= */
 EXPORT void subsystem2_test(void)
 {
     TEST_INIT();
@@ -91,7 +244,7 @@ EXPORT void subsystem2_test(void)
     }
 
     /* ===================================================================== */
-    /* GROUP 2: μT-Kernel Compatibility Handles (Subsystems 3 & 4 Linkage)   */
+    /* GROUP 2: uT-Kernel Compatibility Handles (Subsystems 3 & 4 Linkage)   */
     /* ===================================================================== */
 
     /* S2-U05: Verify compatibility semaphore allocation */
@@ -465,8 +618,8 @@ EXPORT void subsystem2_test(void)
         motion_update_steering(35);
         motion_set_mode_line_following(false);
         TEST_CHECK("S2-U43",
-                   s_latest_steering_offset == 0,
-                   "motion_set_mode_line_following(false) actively zeroes s_latest_steering_offset");
+                   motion_get_steering_offset() == 0,
+                   "motion_set_mode_line_following(false) actively zeroes steering offset");
     }
 
     /* S2-U44: Steering updates rejected when line-following mode is disabled */
@@ -474,7 +627,7 @@ EXPORT void subsystem2_test(void)
         motion_set_mode_line_following(false);
         motion_update_steering(45);
         TEST_CHECK("S2-U44",
-                   s_latest_steering_offset == 0,
+                   motion_get_steering_offset() == 0,
                    "motion_update_steering is ignored when line following is deauthorized");
     }
 
@@ -544,8 +697,9 @@ EXPORT void subsystem2_test(void)
 
     /* S2-U51: Telemetry getter memory overwrite verification */
     {
+        /* Initialize buffer with non-zero reserved bits */
         motion_status_packed_t stat_buf;
-        memset(&stat_buf, 0xFF, sizeof(stat_buf)); /* Poison with 0xFF */
+        stat_buf.reserved = 0x1Fu;
         motion_get_status(&stat_buf);
         TEST_CHECK("S2-U51",
                    stat_buf.reserved == 0u,
@@ -556,9 +710,11 @@ EXPORT void subsystem2_test(void)
     {
         test_flush_queue();
         ER q_res = E_OK;
-        for (int i = 0; i < 20; i++) {
+        for (int i = 0; i < 20; i++)
+        {
             q_res = motion_move_forward(10u, 10u);
-            if (q_res != E_OK) {
+            if (q_res != E_OK)
+            {
                 break;
             }
         }
@@ -572,6 +728,11 @@ EXPORT void subsystem2_test(void)
     drv_motor_brake();
 
     TEST_SUMMARY("subsystem2");
+
+    /* ===================================================================== */
+    /* Transition to Interactive Hardware Diagnostics Shell                   */
+    /* ===================================================================== */
+    manual_motor_test_shell();
 }
 
 #endif /* APP_TEST */

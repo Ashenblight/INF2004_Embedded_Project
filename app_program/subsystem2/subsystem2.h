@@ -19,47 +19,47 @@
 
 typedef enum
 {
-    MOTION_STATE_IDLE       = 0u,
+    MOTION_STATE_IDLE = 0u,
     MOTION_STATE_CONTINUOUS = 1u,
-    MOTION_STATE_MANOEUVRE  = 2u,
-    MOTION_STATE_STOPPING   = 3u,
-    MOTION_STATE_STOPPED    = 4u,
-    MOTION_STATE_FAULT      = 5u
+    MOTION_STATE_MANOEUVRE = 2u,
+    MOTION_STATE_STOPPING = 3u,
+    MOTION_STATE_STOPPED = 4u,
+    MOTION_STATE_FAULT = 5u
 } motion_state_t;
 
 typedef enum
 {
-    MOTION_CMD_STOP             = 0u,
+    MOTION_CMD_STOP = 0u,
     MOTION_CMD_DRIVE_CONTINUOUS = 1u,
-    MOTION_CMD_DRIVE_DISTANCE   = 2u,
-    MOTION_CMD_POINT_TURN       = 3u
+    MOTION_CMD_DRIVE_DISTANCE = 2u,
+    MOTION_CMD_POINT_TURN = 3u
 } motion_cmd_type_t;
 
 typedef struct
 {
-    uint32_t cmd_type           : 2;  /* 2 bits: motion_cmd_type_t */
-    uint32_t speed_duty         : 7;  /* 7 bits: 0-100% duty cycle */
-    int32_t  target_angle_deg   : 9;  /* 9 bits signed: -180 to +180 deg */
+    uint32_t cmd_type : 2;            /* 2 bits: motion_cmd_type_t */
+    uint32_t speed_duty : 7;          /* 7 bits: 0-100% duty cycle */
+    int32_t target_angle_deg : 9;     /* 9 bits signed: -180 to +180 deg */
     uint32_t target_distance_mm : 10; /* 10 bits: 0 to 1023 mm */
-    uint32_t reserved           : 4;  /* 4 bits padding */
+    uint32_t reserved : 4;            /* 4 bits padding */
 } __attribute__((packed)) motion_command_packed_t;
 
 _Static_assert(sizeof(motion_command_packed_t) == 4u, "motion_command_packed_t must be 4 bytes!");
 
 typedef struct
 {
-    uint8_t  state              : 3;  /* 3 bits: 6 operating states (0 to 5) */
-    uint8_t  left_motor_mode    : 2;  /* 2 bits: motor_mode_t (0 to 3) */
-    uint8_t  right_motor_mode   : 2;  /* 2 bits: motor_mode_t (0 to 3) */
-    uint8_t  motor_stall_fault  : 1;  /* 1 bit: 0 = nominal, 1 = stall alert */
+    uint8_t state : 3;             /* 3 bits: 6 operating states (0 to 5) */
+    uint8_t left_motor_mode : 2;   /* 2 bits: motor_mode_t (0 to 3) */
+    uint8_t right_motor_mode : 2;  /* 2 bits: motor_mode_t (0 to 3) */
+    uint8_t motor_stall_fault : 1; /* 1 bit: 0 = nominal, 1 = stall alert */
 
-    int8_t   left_delta_ticks;        /* 8-bit signed delta per 10 ms (-128 to +127) */
-    int8_t   right_delta_ticks;       /* 8-bit signed delta per 10 ms (-128 to +127) */
+    int8_t left_delta_ticks;  /* 8-bit signed delta per 10 ms (-128 to +127) */
+    int8_t right_delta_ticks; /* 8-bit signed delta per 10 ms (-128 to +127) */
 
-    uint8_t  encoder_fault      : 1;  /* 1 bit: 0 = nominal, 1 = pulse fault */
-    uint8_t  stop_timeout_fault : 1;  /* 1 bit: 0 = nominal, 1 = stop overrun */
-    uint8_t  line_mode_en       : 1;  /* 1 bit: 0 = manual, 1 = line following */
-    uint8_t  reserved           : 5;  /* 5 bits padding */
+    uint8_t encoder_fault : 1;      /* 1 bit: 0 = nominal, 1 = pulse fault */
+    uint8_t stop_timeout_fault : 1; /* 1 bit: 0 = nominal, 1 = stop overrun */
+    uint8_t line_mode_en : 1;       /* 1 bit: 0 = manual, 1 = line following */
+    uint8_t reserved : 5;           /* 5 bits padding */
 } __attribute__((packed)) motion_status_packed_t;
 
 _Static_assert(sizeof(motion_status_packed_t) == 4u, "motion_status_packed_t must be 4 bytes!");
@@ -70,10 +70,10 @@ _Static_assert(sizeof(motion_status_packed_t) == 4u, "motion_status_packed_t mus
 typedef struct
 {
     T_MSG hdr;
-    UW    seq;
-    UW    time_ms;
-    INT   value;
-    INT   prc;
+    UW seq;
+    UW time_ms;
+    INT value;
+    INT prc;
 } SAMPLE_MSG;
 
 #define S2_POOL_COUNT 4
@@ -89,19 +89,19 @@ IMPORT ER subsystem2_start(void);
 /* ========================================================================= */
 /* 2. Actuator / Manoeuvre APIs (Called by Subsystem 5 / Vehicle Controller) */
 /* ========================================================================= */
-ER   motion_move_forward(uint16_t distance_mm, uint8_t speed_duty);
-ER   motion_move_backward(uint16_t distance_mm, uint8_t speed_duty);
-ER   motion_point_turn(int16_t angle_deg, uint8_t speed_duty);
-ER   motion_start_continuous(uint8_t speed_duty);
-ER   motion_stop(void);
+ER motion_move_forward(uint16_t distance_mm, uint8_t speed_duty);
+ER motion_move_backward(uint16_t distance_mm, uint8_t speed_duty);
+ER motion_point_turn(int16_t angle_deg, uint8_t speed_duty);
+ER motion_start_continuous(uint8_t speed_duty);
+ER motion_stop(void);
 void motion_emergency_stop(void);
 void motion_clear_emergency_stop(void);
 
 /* Convenience macros matching project brief */
-#define motion_move_fwd(dist)           motion_move_forward((dist), 60u)
-#define motion_move_bwd(dist)           motion_move_backward((dist), 60u)
-#define motion_turn_left(angle)         motion_point_turn(-(int16_t)(angle), 40u)
-#define motion_turn_right(angle)        motion_point_turn((int16_t)(angle), 40u)
+#define motion_move_fwd(dist) motion_move_forward((dist), 60u)
+#define motion_move_bwd(dist) motion_move_backward((dist), 60u)
+#define motion_turn_left(angle) motion_point_turn(-(int16_t)(angle), 40u)
+#define motion_turn_right(angle) motion_point_turn((int16_t)(angle), 40u)
 
 /* ========================================================================= */
 /* 3. Line Following Streaming APIs (Called by Subsystem 3 / Line Following) */
@@ -118,5 +118,8 @@ void motion_get_status(motion_status_packed_t *p_out_status);
 
 /* Backward compatibility alias for Aloysius & Dexter */
 #define odometry_get_snapshot(p_l, p_r) motion_get_odometry((p_l), (p_r))
+
+// s_latest_steering_offset getter function prototype
+int8_t motion_get_steering_offset(void);
 
 #endif /* SUBSYSTEM2_H */
