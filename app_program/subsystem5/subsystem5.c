@@ -4,7 +4,7 @@
 
 EXPORT ER subsystem5_init(void)
 {
-    return E_OK;
+    return vehicle_controller_init();
 }
 
 EXPORT ER subsystem5_start(void)

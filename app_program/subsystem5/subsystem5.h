@@ -14,4 +14,7 @@
 
 #define S5_PRI_MAIN	20		/* priority band 20-21 (TEAM.md) */
 
+/* Created before Motion Control starts and used for its event notifications. */
+IMPORT ID FLG_CONTROLLER;
+
 #endif /* SUBSYSTEM5_H */
