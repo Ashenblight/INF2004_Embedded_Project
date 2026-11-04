@@ -103,6 +103,11 @@ static void process(const barcode_observation_t *sample)
     }
     if (result != BARCODE_CHARACTER)
         return;
+#if !APP_TEST
+    tm_printf((UB *)"[S3 BARCODE] decoded=%c scan=%s\n",
+              'A' + (INT)message.character.letter,
+              message.character.reversed ? "RIGHT_TO_LEFT" : "LEFT_TO_RIGHT");
+#endif
     if (barcode_mapping_resolve(message.character.letter, generation, &movement, &revision) != E_OK)
     {
         count(&statistics.cancelled);

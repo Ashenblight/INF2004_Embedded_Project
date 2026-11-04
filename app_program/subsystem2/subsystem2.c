@@ -10,7 +10,7 @@
 #include "drv_motor.h"
 #include "drv_encoder.h"
 
-#define TARGET_BASE_CRUISE_TICKS (3) /* Reduced to 3 ticks (~5 cm/s) */
+#define TARGET_BASE_CRUISE_TICKS (1)
 #define KP_SPEED (320)
 #define KI_SPEED (35)
 #define INTEGRAL_CLAMP (150)

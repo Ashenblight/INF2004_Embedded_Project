@@ -1,6 +1,7 @@
-/* Vehicle Controller -- Button-controlled line-following test. */
+/* Vehicle Controller -- Button-controlled line following and barcode test. */
 #include "vehicle_controller.h"
 #include "subsystem5.h"
+#include "../subsystem3/barcode_task.h"
 #include "../subsystem3/line_task.h"
 
 #if !APP_TEST
@@ -8,7 +9,6 @@
 #define S5_BUTTON_PIN       20U
 #define S5_BUTTON_POLL_MS   10U
 #define S5_DEBOUNCE_SAMPLES 4U
-#define S5_TEST_SPEED_DUTY  20U
 
 /* Buddy 2's API is optional in the standalone project template. */
 extern void motion_set_mode_line_following(bool enabled) __attribute__((weak));
@@ -21,6 +21,34 @@ static bool line_is_at_junction(uint8_t packed)
     return (packed & LINE_STATUS_JUNCTION_HOLD_MASK) != 0U ||
            (packed & LINE_STATUS_STEERING_MASK) ==
                (LINE_STEER_CROSS_JUNCTION << LINE_STATUS_STEERING_SHIFT);
+}
+
+static ER start_barcode_test(void)
+{
+    /* Bench mapping only. Preserve a mapping already supplied by the team. */
+    static const barcode_mapping_entry_t test_map[] = {
+        {'A' - 'A', BARCODE_MOVE_FORWARD},
+        {'B' - 'A', BARCODE_MOVE_LEFT},
+        {'C' - 'A', BARCODE_MOVE_RIGHT},
+        {'D' - 'A', BARCODE_MOVE_UTURN},
+    };
+    barcode_control_status_t status;
+    ER result = barcode_task_control_status(&status);
+    if (result != E_OK)
+        return result;
+    if (!status.mapping_ready)
+    {
+        result = barcode_mapping_apply(test_map, 1U);
+        if (result != E_OK)
+            return result;
+    }
+    if (status.faults != 0U)
+    {
+        result = barcode_task_clear_faults();
+        if (result != E_OK)
+            return result;
+    }
+    return barcode_task_set_enabled(true);
 }
 
 static bool start_line_following(void)
@@ -40,17 +68,27 @@ static bool start_line_following(void)
         return false;
     }
 
+    ER result = start_barcode_test();
+    if (result != E_OK)
+    {
+        (void)line_task_set_following_enabled(false);
+        tm_printf((UB *)"[S5] Barcode could not start (%d).\n", (INT)result);
+        return false;
+    }
+
     motion_set_mode_line_following(true);
-    ER result = motion_start_continuous(S5_TEST_SPEED_DUTY);
+    /* Zero selects Motion Control's built-in cruise speed. */
+    result = motion_start_continuous(0U);
     if (result != E_OK)
     {
         motion_set_mode_line_following(false);
+        (void)barcode_task_set_enabled(false);
         (void)line_task_set_following_enabled(false);
         tm_printf((UB *)"[S5] Motion rejected start (%d).\n", (INT)result);
         return false;
     }
 
-    tm_printf((UB *)"[S5] Line following started.\n");
+    tm_printf((UB *)"[S5] Line following and barcode scanning started.\n");
     return true;
 }
 
@@ -61,6 +99,7 @@ static void stop_line_following(void)
         motion_emergency_stop();
     }
     motion_set_mode_line_following(false);
+    (void)barcode_task_set_enabled(false);
     (void)line_task_set_following_enabled(false);
     tm_printf((UB *)"[S5] Stop requested.\n");
 }
@@ -96,12 +135,19 @@ static void vehicle_button_task(INT stacd, void *exinf)
             new_press = pressed;
         }
 
+        /* Drain the bench result buffer. This test does not execute turns. */
+        barcode_message_t barcode_result;
+        (void)barcode_task_receive_result(&barcode_result, TMO_POL);
+
         if (running)
         {
             line_task_status_t status;
+            barcode_control_status_t barcode_status;
+            const bool barcode_fault = barcode_task_control_status(&barcode_status) == E_OK &&
+                                       barcode_status.faults != 0U;
             const bool at_junction = line_task_get_latest(&status) == E_OK &&
                                      line_is_at_junction(status.packed);
-            if (new_press || at_junction)
+            if (new_press || at_junction || barcode_fault)
             {
                 stop_line_following();
                 running = false;
