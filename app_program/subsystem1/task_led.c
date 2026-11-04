@@ -95,6 +95,20 @@ EXPORT void mqtt_rx_test_task(INT stacd, void *exinf)
                 tm_printf((UB*)"buddy1: INVALID STOP packet rejected\n");
             }
 
+
+        } else if (len == MQTT_PACKET_BARCODE_MAP_LENGTH) {
+            mqtt_barcode_map_t mapping = {0};
+
+            /* validate incoming barcode mapping */
+            if (mqtt_packet_decode_barcode_map(
+                    rx_buffer, (unsigned int)len, &mapping) == 0) {
+
+                tm_printf((UB*)"buddy1: VALID BARCODE MAP received, revision=%u\n",
+                          mapping.revision);
+            } else {
+                tm_printf((UB*)"buddy1: INVALID BARCODE MAP rejected\n");
+            }
+
         } else if (len == 3) {
             tm_printf((UB*)"buddy1: RX %d bytes: %02X %02X %02X\n",
                       len,
