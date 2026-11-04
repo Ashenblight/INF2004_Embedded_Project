@@ -51,164 +51,89 @@ static motion_command_packed_t test_pop_queue(void)
 }
 
 /* ========================================================================= */
-/* Interactive Manual Motor & Encoder Diagnostic Shell                       */
+/* Live Motor Actuator & Wheel Encoder Verification Routine                  */
 /* ========================================================================= */
-static void print_manual_menu(void)
+static void run_live_actuator_demonstration(void)
 {
     tm_printf((UB *)"\n=======================================================\n");
-    tm_printf((UB *)"      Subsystem 2: Interactive Manual Diagnostic Menu   \n");
+    tm_printf((UB *)"   Subsystem 2: Live Actuator & Encoder Verification  \n");
     tm_printf((UB *)"=======================================================\n");
-    tm_printf((UB *)"  [w] or [1] : Move Forward  (~30%% PWM, 1.0 sec)\n");
-    tm_printf((UB *)"  [s] or [2] : Move Backward (~30%% PWM, 1.0 sec)\n");
-    tm_printf((UB *)"  [a] or [3] : Point Turn Left  (CCW, 0.6 sec)\n");
-    tm_printf((UB *)"  [d] or [4] : Point Turn Right (CW, 0.6 sec)\n");
-    tm_printf((UB *)"  [b] or [5] : Active Dynamic Brake (Lock Wheels)\n");
-    tm_printf((UB *)"  [c] or [6] : High-Z Coast (Free Wheel)\n");
-    tm_printf((UB *)"  [r]        : Reset Encoder Ticks to 0\n");
-    tm_printf((UB *)"  [h] or [?] : Show This Menu\n");
-    tm_printf((UB *)"  [q]        : Quit Manual Mode -> Resume RTOS Runtime\n");
-    tm_printf((UB *)"-------------------------------------------------------\n");
-    tm_printf((UB *)"Tip: Rotate wheels by hand anytime to test live ticks!\n\n");
-    tm_printf((UB *)"Live heartbeat auto-updates every 500 ms below:\n\n");
-}
 
-static void manual_motor_test_shell(void)
-{
-    print_manual_menu();
+    /* In run_live_actuator_demonstration(): */
 
-    int32_t last_disp_l = -999999;
-    int32_t last_disp_r = -999999;
+    /* 1. Drive Forward at ~5 cm/s (2300 PWM) */
+    tm_printf((UB *)"\n[DEMO 1] Driving FORWARD for 1.5s (~5 cm/s)...\n");
+    drv_encoder_reset();
+    drv_motor_set_speed(2300, 2300);
+    tk_dly_tsk(1500);
+    drv_motor_brake();
+    tk_dly_tsk(200);
 
-    uint32_t heartbeat_counter = 0;
+    int32_t fwd_l = 0, fwd_r = 0;
+    drv_encoder_get_snapshot(&fwd_l, &fwd_r);
+    tm_printf((UB *)"  --> BRAKED: Left Ticks = %ld, Right Ticks = %ld\n", (long)fwd_l, (long)fwd_r);
 
-    bool exit_shell = false;
+    /* 2. Drive Backward at ~5 cm/s (2300 PWM) */
+    tm_printf((UB *)"\n[DEMO 2] Driving BACKWARD for 1.5s (~5 cm/s)...\n");
+    drv_encoder_reset();
+    drv_motor_set_speed(-2300, -2300);
+    tk_dly_tsk(1500);
+    drv_motor_brake();
+    tk_dly_tsk(200);
 
-    while (!exit_shell)
+    int32_t bwd_l = 0, bwd_r = 0;
+    drv_encoder_get_snapshot(&bwd_l, &bwd_r);
+    tm_printf((UB *)"  --> BRAKED: Left Ticks = %ld, Right Ticks = %ld\n", (long)bwd_l, (long)bwd_r);
+
+    /* 3.1. In-Place Point Turn LEFT at Gentle Speed */
+    tm_printf((UB *)"\n[DEMO 3] Point Turn LEFT (CCW) for 0.8s...\n");
+    drv_encoder_reset();
+    drv_motor_set_speed(-2400, 2400);
+    tk_dly_tsk(800);
+    drv_motor_brake();
+    tk_dly_tsk(200);
+
+    /* 3.2. In-Place Point Turn RIGHT at Gentle Speed */
+    tm_printf((UB *)"\n[DEMO 3] Point Turn RIGHT (CCW) for 0.8s...\n");
+    drv_encoder_reset();
+    drv_motor_set_speed(2400, -2400);
+    tk_dly_tsk(800);
+    drv_motor_brake();
+    tk_dly_tsk(200);
+
+    int32_t turn_l = 0, turn_r = 0;
+    drv_encoder_get_snapshot(&turn_l, &turn_r);
+    tm_printf((UB *)"  --> BRAKED: Left Ticks = %ld, Right Ticks = %ld\n", (long)turn_l, (long)turn_r);
+
+    /* 4. Live Hand-Spin Monitor (Rotate wheels by hand to see live ticks) */
+    tm_printf((UB *)"\n[DEMO 4] Entering Continuous Live Tick Monitoring...\n");
+    tm_printf((UB *)"         (Rotate wheels by hand to verify hardware ticks!)\n\n");
+    drv_encoder_reset();
+
+    int32_t last_l = -99999;
+    int32_t last_r = -99999;
+    uint32_t loops = 0;
+
+    /* Monitor for 30 seconds or indefinitely */
+    while (loops < 150)
     {
-        /* Poll keyboard without blocking (wait = 0) */
-        INT c = tm_getchar(0);
-
-        /* Print non-zero return codes to see what tm_getchar is returning */
-        if (c != 0)
-        {
-            tm_printf((UB *)"[DEBUG] tm_getchar returned: %d\n", c);
-        }
-
-        if (c > 0)
-        {
-            switch (c)
-            {
-            case 'w':
-            case '1':
-            {
-                tm_printf((UB *)"\n[CMD] Moving FORWARD (4000 PWM for 1.0s)...\n");
-                drv_motor_set_speed(4000, 4000);
-                tk_dly_tsk(1000);
-                drv_motor_brake();
-                tm_printf((UB *)"[CMD] Braked.\n");
-                break;
-            }
-
-            case 's':
-            case '2':
-            {
-                tm_printf((UB *)"\n[CMD] Moving BACKWARD (-4000 PWM for 1.0s)...\n");
-                drv_motor_set_speed(-4000, -4000);
-                tk_dly_tsk(1000);
-                drv_motor_brake();
-                tm_printf((UB *)"[CMD] Braked.\n");
-                break;
-            }
-
-            case 'a':
-            case '3':
-            {
-                tm_printf((UB *)"\n[CMD] POINT TURN LEFT (CCW for 0.6s)...\n");
-                drv_motor_set_speed(-4000, 4000);
-                tk_dly_tsk(600);
-                drv_motor_brake();
-                tm_printf((UB *)"[CMD] Braked.\n");
-                break;
-            }
-
-            case 'd':
-            case '4':
-            {
-                tm_printf((UB *)"\n[CMD] POINT TURN RIGHT (CW for 0.6s)...\n");
-                drv_motor_set_speed(4000, -4000);
-                tk_dly_tsk(600);
-                drv_motor_brake();
-                tm_printf((UB *)"[CMD] Braked.\n");
-                break;
-            }
-
-            case 'b':
-            case '5':
-            {
-                tm_printf((UB *)"\n[CMD] ACTIVE BRAKE applied (terminals grounded LOW).\n");
-                drv_motor_brake();
-                break;
-            }
-
-            case 'c':
-            case '6':
-            {
-                tm_printf((UB *)"\n[CMD] COAST mode applied (PWM slices disabled).\n");
-                drv_motor_coast();
-                break;
-            }
-
-            case 'r':
-            case 'R':
-            {
-                drv_encoder_reset();
-                last_disp_l = -999999;
-                last_disp_r = -999999;
-                tm_printf((UB *)"\n[CMD] Encoders reset to 0.\n");
-                break;
-            }
-
-            case 'h':
-            case 'H':
-            case '?':
-            {
-                print_manual_menu();
-                break;
-            }
-
-            case 'q':
-            case 'Q':
-            {
-                tm_printf((UB *)"\n[CMD] Exiting manual diagnostics shell...\n\n");
-                exit_shell = true;
-                break;
-            }
-
-            default:
-                break;
-            }
-        }
-
-        /* Continuous Live Encoder Reporting: Update line whenever ticks change or every 500 ms */
         int32_t cur_l = 0;
         int32_t cur_r = 0;
         drv_encoder_get_snapshot(&cur_l, &cur_r);
 
-        heartbeat_counter++;
-
-        /* Print every 500 ms (5 * 100ms) OR instantly when ticks change */
-        if (heartbeat_counter >= 5 || cur_l != last_disp_l || cur_r != last_disp_r)
+        if (cur_l != last_l || cur_r != last_r)
         {
-            tm_printf((UB *)"  [HEARTBEAT] Left Ticks = %6d  |  Right Ticks = %6d\n", cur_l, cur_r);
-            last_disp_l = cur_l;
-            last_disp_r = cur_r;
-            heartbeat_counter = 0;
+            tm_printf((UB *)"  [LIVE TICKS] Left: %6ld  |  Right: %6ld\n", (long)cur_l, (long)cur_r);
+            last_l = cur_l;
+            last_r = cur_r;
         }
 
-        tk_dly_tsk(100); /* 100 ms polling cadence/loop delay */
+        tk_dly_tsk(200);
+        loops++;
     }
 
     drv_motor_brake();
+    tm_printf((UB *)"\n[DONE] Demo sequence completed. Resuming RTOS runtime.\n\n");
 }
 
 /* ========================================================================= */
@@ -737,10 +662,8 @@ EXPORT void subsystem2_test(void)
 
     TEST_SUMMARY("subsystem2");
 
-    /* ===================================================================== */
-    /* Transition to Interactive Hardware Diagnostics Shell                   */
-    /* ===================================================================== */
-    manual_motor_test_shell();
+    /* Transition to Interactive Hardware Diagnostics Shell */
+    run_live_actuator_demonstration();
 }
 
 #endif /* APP_TEST */
