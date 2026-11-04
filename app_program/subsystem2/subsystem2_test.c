@@ -51,7 +51,7 @@ static motion_command_packed_t test_pop_queue(void)
 }
 
 /* ========================================================================= */
-/* Public API Live Actuator Demonstration (Compiled with standard make -j8)  */
+/* Public API Live Actuator Demonstration (5.0 seconds per manoeuvre)       */
 /* ========================================================================= */
 
 EXPORT void run_live_actuator_demonstration_api(void)
@@ -61,14 +61,16 @@ EXPORT void run_live_actuator_demonstration_api(void)
     tm_printf((UB *)"  Duration: 5.0s per manoeuvre                    \n");
     tm_printf((UB *)"==================================================\n");
 
+    /* Ensure emergency latches from unit tests are fully unlocked */
+    motion_clear_emergency_stop();
     tk_dly_tsk(500);
 
     /* --------------------------------------------------------------------- */
     /* 1. Drive FORWARD for 5.0s                                             */
     /* --------------------------------------------------------------------- */
-    tm_printf((UB *)"\n[DEMO 1/4] Driving FORWARD for 5.0s...\n");
+    tm_printf((UB *)"\n[DEMO 1/4] Driving FORWARD for 5.0s (Public API)...\n");
     motion_reset_odometry();
-    motion_start_continuous(30u);
+    motion_start_continuous(35u);
 
     for (int sec = 1; sec <= 5; sec++)
     {
@@ -86,7 +88,7 @@ EXPORT void run_live_actuator_demonstration_api(void)
     /* --------------------------------------------------------------------- */
     /* 2. Drive BACKWARD for 5.0s                                            */
     /* --------------------------------------------------------------------- */
-    tm_printf((UB *)"\n[DEMO 2/4] Driving BACKWARD for 5.0s...\n");
+    tm_printf((UB *)"\n[DEMO 2/4] Driving BACKWARD for 5.0s (Public API)...\n");
     motion_reset_odometry();
 
     for (int sec = 1; sec <= 5; sec++)
@@ -95,7 +97,7 @@ EXPORT void run_live_actuator_demonstration_api(void)
         motion_get_status(&status);
         if (status.state != MOTION_STATE_MANOEUVRE)
         {
-            motion_move_backward(1000u, 30u);
+            motion_move_backward(1000u, 35u);
         }
 
         tk_dly_tsk(1000);
@@ -112,7 +114,7 @@ EXPORT void run_live_actuator_demonstration_api(void)
     /* --------------------------------------------------------------------- */
     /* 3. Point Turn LEFT for 5.0s                                           */
     /* --------------------------------------------------------------------- */
-    tm_printf((UB *)"\n[DEMO 3/4] Point Turn LEFT for 5.0s...\n");
+    tm_printf((UB *)"\n[DEMO 3/4] Point Turn LEFT for 5.0s (Public API)...\n");
     motion_reset_odometry();
 
     for (int sec = 1; sec <= 5; sec++)
@@ -121,7 +123,7 @@ EXPORT void run_live_actuator_demonstration_api(void)
         motion_get_status(&status);
         if (status.state != MOTION_STATE_MANOEUVRE)
         {
-            motion_point_turn(-180, 30u);
+            motion_point_turn(-180, 35u);
         }
 
         tk_dly_tsk(1000);
@@ -138,7 +140,7 @@ EXPORT void run_live_actuator_demonstration_api(void)
     /* --------------------------------------------------------------------- */
     /* 4. Point Turn RIGHT for 5.0s                                          */
     /* --------------------------------------------------------------------- */
-    tm_printf((UB *)"\n[DEMO 4/4] Point Turn RIGHT for 5.0s...\n");
+    tm_printf((UB *)"\n[DEMO 4/4] Point Turn RIGHT for 5.0s (Public API)...\n");
     motion_reset_odometry();
 
     for (int sec = 1; sec <= 5; sec++)
@@ -147,7 +149,7 @@ EXPORT void run_live_actuator_demonstration_api(void)
         motion_get_status(&status);
         if (status.state != MOTION_STATE_MANOEUVRE)
         {
-            motion_point_turn(180, 30u);
+            motion_point_turn(180, 35u);
         }
 
         tk_dly_tsk(1000);
@@ -161,7 +163,7 @@ EXPORT void run_live_actuator_demonstration_api(void)
     motion_clear_emergency_stop();
 
     tm_printf((UB *)"\n==================================================\n");
-    tm_printf((UB *)"  DEMONSTRATION COMPLETE: ALL TESTS 5.0s          \n");
+    tm_printf((UB *)"  DEMONSTRATION COMPLETE                          \n");
     tm_printf((UB *)"==================================================\n\n");
 }
 
@@ -690,9 +692,6 @@ EXPORT void subsystem2_test(void)
     drv_motor_brake();
 
     TEST_SUMMARY("subsystem2");
-
-    /* Trigger the live 5-second public API demo during the test run */
-    run_live_actuator_demonstration_api();
 }
 
 #endif /* APP_TEST */

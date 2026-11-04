@@ -7,6 +7,11 @@
 #include "subsystem3/line_task.h"
 #include <stdint.h>
 
+#if APP_TEST
+/* Prototype for live public API actuator demo implemented in subsystem2_test.c */
+extern void run_live_actuator_demonstration_api(void);
+#endif
+
 EXPORT ID app_start_task(FP entry, PRI pri, UW prc, const char *name)
 {
 	T_CTSK ctsk = {0};
@@ -71,6 +76,12 @@ EXPORT INT usermain(void)
 
 	/* Start motion before the sensors and the GP20 controller. */
 	CHECK(subsystem2_start(), "subsystem2_start");
+
+#if APP_TEST
+	/* Phase 2 Test: Now that motion_control_task is active, run 5s API demo */
+	run_live_actuator_demonstration_api();
+#endif
+
 	CHECK(subsystem3_start(), "subsystem3_start");
 	CHECK(subsystem5_start(), "subsystem5_start");
 
