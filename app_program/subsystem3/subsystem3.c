@@ -30,7 +30,11 @@ EXPORT ER subsystem3_init(void)
 	   holder is temporarily raised to the waiter's priority. */
 	cmtx.mtxatr = TA_INHERIT;
 	mtx_stats = tk_cre_mtx(&cmtx);
-	return (mtx_stats < E_OK) ? mtx_stats : E_OK;
+	if (mtx_stats < E_OK) {
+		return mtx_stats;
+	}
+	ER line_result = line_task_init();
+	return (line_result < E_OK) ? line_result : barcode_task_init();
 }
 
 EXPORT ER subsystem3_start(void)
@@ -38,5 +42,6 @@ EXPORT ER subsystem3_start(void)
 	/* Pinned to core 0 (TP_PRC1): opposite core to the producer */
 	ID tid = app_start_task(consumer_task, S3_PRI_CONSUMER, TP_PRC1,
 				"consumer_task");
-	return (tid < E_OK) ? tid : E_OK;
+	ER result = (tid < E_OK) ? tid : line_task_start();
+	return (result < E_OK) ? result : barcode_task_start();
 }

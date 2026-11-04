@@ -57,8 +57,10 @@ EXPORT INT usermain(void)
 	tm_printf((UB *)"single-core build\n");
 #endif
 
-	/* Phase 1: Initialize Subsystem 2 */
+	/* Initialize motion, sensors and the vehicle controller. */
 	CHECK(subsystem2_init(), "subsystem2_init");
+	CHECK(subsystem3_init(), "subsystem3_init");
+	CHECK(subsystem5_init(), "subsystem5_init");
 
 #if APP_TEST
 	tm_printf((UB *)"[TEST] === test run start ===\n");
@@ -66,10 +68,10 @@ EXPORT INT usermain(void)
 	tm_printf((UB *)"[TEST] === test run end ===\n\n");
 #endif
 
-	/* Phase 2: Start Subsystem 2 background tasks */
+	/* Start motion before the sensors and the GP20 controller. */
 	CHECK(subsystem2_start(), "subsystem2_start");
-
-	tm_printf((UB *)"Subsystem 2 started cleanly! Entering active loop...\n\n");
+	CHECK(subsystem3_start(), "subsystem3_start");
+	CHECK(subsystem5_start(), "subsystem5_start");
 
 	/* Instead of silent tk_slp_tsk, print a heartbeat every 2 seconds so
 	   you can always verify the terminal connection at any time. */
@@ -77,7 +79,7 @@ EXPORT INT usermain(void)
 	while (1)
 	{
 		tk_dly_tsk(2000);
-		tm_printf((UB *)"[HEARTBEAT] Pico alive | S2 loop active (#%u)\n", ++count);
+		tm_printf((UB *)"[HEARTBEAT] Pico alive (#%u)\n", ++count);
 	}
 
 	return 0;
