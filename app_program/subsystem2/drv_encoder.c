@@ -1,11 +1,12 @@
 /** @file drv_encoder.c
  *  @brief Hardware edge interrupt quadrature encoder driver and shared GPIO dispatcher.
+ *
+ *  INF2004 Embedded Systems Programming - Subsystem 2 (Aldric)
  */
-#include <tk/tkernel.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <tk/tkernel.h>
 #include "drv_encoder.h"
-// #include <stddef.h>
 
 /* RP2040 Hardware Register Base Addresses */
 #define RP2040_IO_BANK0_BASE (0x40014000UL)
@@ -17,14 +18,15 @@
 #define REG_PADS_GPIO(pin) (*(volatile uint32_t *)(RP2040_PADS_BANK0_BASE + 0x04UL + ((uint32_t)(pin) * 4UL)))
 #define REG_SIO_GPIO_IN (*(volatile uint32_t *)(RP2040_SIO_BASE + 0x04UL))
 
-/* Interrupt Registers */
-#define REG_IO_PROC0_INTE0 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x100UL))
-#define REG_IO_PROC0_INTS0 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x178UL))
-#define REG_IO_PROC0_INTS1 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x17CUL))
+/* IO_BANK0 Interrupt Registers (Core 0 PROC0) */
 #define REG_IO_INTR0 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x0F0UL))
 #define REG_IO_INTR1 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x0F4UL))
+#define REG_IO_PROC0_INTE0 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x100UL))
+#define REG_IO_PROC0_INTS0 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x120UL)) /* Corrected offset */
+#define REG_IO_PROC0_INTS1 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x124UL)) /* Corrected offset */
 
-/* ARM Cortex-M0+ NVIC */
+/* ARM Cortex-M0+ System Control & NVIC */
+#define REG_VTOR (*(volatile uint32_t *)(RP2040_PPB_BASE + 0xED08UL))
 #define REG_NVIC_ISER (*(volatile uint32_t *)(RP2040_PPB_BASE + 0xE100UL))
 #define REG_NVIC_ICPR (*(volatile uint32_t *)(RP2040_PPB_BASE + 0xE280UL))
 
@@ -66,33 +68,7 @@ static inline void cpu_irq_restore(uint32_t primask)
     __asm__ volatile("msr PRIMASK, %0" ::"r"(primask) : "memory");
 }
 
-void gpio_shared_irq_callback(uint32_t gpio, uint32_t events)
-{
-    (void)events;
-    const uint32_t gpio_in = REG_SIO_GPIO_IN;
-    if (gpio == PIN_ENC_LEFT_A || gpio == PIN_ENC_LEFT_B)
-    {
-        const uint8_t curr = (uint8_t)((((gpio_in >> PIN_ENC_LEFT_A) & 1U) << 1U) |
-                                       (((gpio_in >> PIN_ENC_LEFT_B) & 1U)));
-        const uint8_t idx = (uint8_t)((s_left_prev << 2U) | curr);
-        s_left_ticks += QUAD_LOOKUP[idx & 0x0FU];
-        s_left_prev = curr;
-    }
-    else if (gpio == PIN_ENC_RIGHT_A || gpio == PIN_ENC_RIGHT_B)
-    {
-        const uint8_t curr = (uint8_t)((((gpio_in >> PIN_ENC_RIGHT_A) & 1U) << 1U) |
-                                       (((gpio_in >> PIN_ENC_RIGHT_B) & 1U)));
-        const uint8_t idx = (uint8_t)((s_right_prev << 2U) | curr);
-        s_right_ticks += QUAD_LOOKUP[idx & 0x0FU];
-        s_right_prev = curr;
-    }
-    else if (gpio == PIN_US_ECHO)
-    {
-        ultrasonic_echo_isr_handler(events);
-    }
-}
-
-/* Hardware ISR registered to IO_IRQ_BANK0 */
+/* Hardware NVIC ISR for IO_IRQ_BANK0 */
 void isr_io_bank0_handler(UINT dintno)
 {
     (void)dintno;
@@ -100,7 +76,7 @@ void isr_io_bank0_handler(UINT dintno)
     const uint32_t ints1 = REG_IO_PROC0_INTS1;
     const uint32_t gpio_in = REG_SIO_GPIO_IN;
 
-    /* Left Wheel Encoder (GP1, GP3) */
+    /* Service Left Encoder (GP1, GP3) */
     const uint32_t left_mask = (0x0CUL << (PIN_ENC_LEFT_A * 4U)) | (0x0CUL << (PIN_ENC_LEFT_B * 4U));
     if ((ints0 & left_mask) != 0UL)
     {
@@ -112,7 +88,7 @@ void isr_io_bank0_handler(UINT dintno)
         REG_IO_INTR0 = left_mask; /* Acknowledge & clear */
     }
 
-    /* Right Wheel Encoder (GP5, GP7) */
+    /* Service Right Encoder (GP5, GP7) */
     const uint32_t right_mask = (0x0CUL << (PIN_ENC_RIGHT_A * 4U)) | (0x0CUL << (PIN_ENC_RIGHT_B * 4U));
     if ((ints0 & right_mask) != 0UL)
     {
@@ -124,7 +100,7 @@ void isr_io_bank0_handler(UINT dintno)
         REG_IO_INTR0 = right_mask; /* Acknowledge & clear */
     }
 
-    /* Ultrasonic Echo Delegation (GP17) */
+    /* Ultrasonic Echo (GP17) */
     const uint32_t echo_mask = (0x0CUL << ((PIN_US_ECHO - 16U) * 4U));
     if ((ints1 & echo_mask) != 0UL)
     {
@@ -146,12 +122,12 @@ void drv_encoder_init(void)
     REG_PADS_GPIO(PIN_ENC_RIGHT_A) = PAD_IE_PUE;
     REG_PADS_GPIO(PIN_ENC_RIGHT_B) = PAD_IE_PUE;
 
-    /* 2. Read baseline Gray code pin states */
+    /* 2. Read initial Gray code states */
     const uint32_t gpio_in = REG_SIO_GPIO_IN;
     s_left_prev = (uint8_t)((((gpio_in >> PIN_ENC_LEFT_A) & 1U) << 1U) | (((gpio_in >> PIN_ENC_LEFT_B) & 1U)));
     s_right_prev = (uint8_t)((((gpio_in >> PIN_ENC_RIGHT_A) & 1U) << 1U) | (((gpio_in >> PIN_ENC_RIGHT_B) & 1U)));
 
-    /* 3. Enable edge transitions in GPIO peripheral */
+    /* 3. Enable EDGE_LOW and EDGE_HIGH interrupts for encoders */
     const uint32_t edge_mask = (0x0CUL << (PIN_ENC_LEFT_A * 4U)) |
                                (0x0CUL << (PIN_ENC_LEFT_B * 4U)) |
                                (0x0CUL << (PIN_ENC_RIGHT_A * 4U)) |
@@ -161,11 +137,21 @@ void drv_encoder_init(void)
     /* 4. Clear pending interrupts */
     REG_NVIC_ICPR = (1UL << IO_IRQ_BANK0);
 
-    /* 5. Register with uT-Kernel interrupt dispatcher & enable NVIC */
+    /* 5. Hook the ISR directly into the Cortex-M0+ Vector Table in RAM */
+    uint32_t *vtor_table = (uint32_t *)REG_VTOR;
+    if (vtor_table != NULL)
+    {
+        vtor_table[16U + IO_IRQ_BANK0] = (uint32_t)isr_io_bank0_handler;
+    }
+
+    /* Also register via uT-Kernel API */
     T_DINT dint = {
         .intatr = TA_HLNG,
         .inthdr = (FP)isr_io_bank0_handler};
+    tk_def_int(16U + IO_IRQ_BANK0, &dint);
     tk_def_int(IO_IRQ_BANK0, &dint);
+
+    /* 6. Unmask NVIC IRQ line 13 */
     REG_NVIC_ISER = (1UL << IO_IRQ_BANK0);
 
     drv_encoder_reset();
@@ -174,6 +160,21 @@ void drv_encoder_init(void)
 void drv_encoder_get_snapshot(int32_t *const p_left_ticks, int32_t *const p_right_ticks)
 {
     const uint32_t status = cpu_irq_disable();
+    const uint32_t gpio_in = REG_SIO_GPIO_IN;
+
+    /* Fallback Polling: Decodes transitions even if interrupts are masked */
+    const uint8_t curr_l = (uint8_t)((((gpio_in >> PIN_ENC_LEFT_A) & 1U) << 1U) |
+                                     (((gpio_in >> PIN_ENC_LEFT_B) & 1U)));
+    const uint8_t idx_l = (uint8_t)((s_left_prev << 2U) | curr_l);
+    s_left_ticks += QUAD_LOOKUP[idx_l & 0x0FU];
+    s_left_prev = curr_l;
+
+    const uint8_t curr_r = (uint8_t)((((gpio_in >> PIN_ENC_RIGHT_A) & 1U) << 1U) |
+                                     (((gpio_in >> PIN_ENC_RIGHT_B) & 1U)));
+    const uint8_t idx_r = (uint8_t)((s_right_prev << 2U) | curr_r);
+    s_right_ticks += QUAD_LOOKUP[idx_r & 0x0FU];
+    s_right_prev = curr_r;
+
     if (p_left_ticks != NULL)
     {
         *p_left_ticks = s_left_ticks;
