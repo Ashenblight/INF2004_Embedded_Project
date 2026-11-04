@@ -61,11 +61,11 @@ static void run_live_actuator_demonstration(void)
 
     /* In run_live_actuator_demonstration(): */
 
-    /* 1. Drive Forward at ~5 cm/s (2300 PWM) */
-    tm_printf((UB *)"\n[DEMO 1] Driving FORWARD for 1.5s (~5 cm/s)...\n");
+    /* 1. Drive Forward at ~1.5 - 2 cm/s */
+    tm_printf((UB *)"\n[DEMO 1] Driving FORWARD for 2.0s (~1.5 to 2 cm/s)...\n");
     drv_encoder_reset();
-    drv_motor_set_speed(2300, 2300);
-    tk_dly_tsk(1500);
+    drv_motor_set_speed(1850, 1850);
+    tk_dly_tsk(2000);
     drv_motor_brake();
     tk_dly_tsk(200);
 
@@ -73,11 +73,11 @@ static void run_live_actuator_demonstration(void)
     drv_encoder_get_snapshot(&fwd_l, &fwd_r);
     tm_printf((UB *)"  --> BRAKED: Left Ticks = %ld, Right Ticks = %ld\n", (long)fwd_l, (long)fwd_r);
 
-    /* 2. Drive Backward at ~5 cm/s (2300 PWM) */
-    tm_printf((UB *)"\n[DEMO 2] Driving BACKWARD for 1.5s (~5 cm/s)...\n");
+    /* 2. Drive Backward at ~1.5 - 2 cm/s */
+    tm_printf((UB *)"\n[DEMO 2] Driving BACKWARD for 2.0s (~1.5 to 2 cm/s)...\n");
     drv_encoder_reset();
-    drv_motor_set_speed(-2300, -2300);
-    tk_dly_tsk(1500);
+    drv_motor_set_speed(-1850, -1850);
+    tk_dly_tsk(2000);
     drv_motor_brake();
     tk_dly_tsk(200);
 
@@ -88,20 +88,24 @@ static void run_live_actuator_demonstration(void)
     /* 3.1. In-Place Point Turn LEFT at Gentle Speed */
     tm_printf((UB *)"\n[DEMO 3] Point Turn LEFT (CCW) for 0.8s...\n");
     drv_encoder_reset();
-    drv_motor_set_speed(-2400, 2400);
-    tk_dly_tsk(800);
-    drv_motor_brake();
-    tk_dly_tsk(200);
-
-    /* 3.2. In-Place Point Turn RIGHT at Gentle Speed */
-    tm_printf((UB *)"\n[DEMO 3] Point Turn RIGHT (CCW) for 0.8s...\n");
-    drv_encoder_reset();
-    drv_motor_set_speed(2400, -2400);
-    tk_dly_tsk(800);
+    drv_motor_set_speed(-1850, 1850);
+    tk_dly_tsk(2000);
     drv_motor_brake();
     tk_dly_tsk(200);
 
     int32_t turn_l = 0, turn_r = 0;
+    drv_encoder_get_snapshot(&turn_l, &turn_r);
+    tm_printf((UB *)"  --> BRAKED: Left Ticks = %ld, Right Ticks = %ld\n", (long)turn_l, (long)turn_r);
+
+    /* 3.2. In-Place Point Turn RIGHT at Gentle Speed */
+    tm_printf((UB *)"\n[DEMO 3] Point Turn RIGHT (CCW) for 0.8s...\n");
+    drv_encoder_reset();
+    drv_motor_set_speed(1850, -1850);
+    tk_dly_tsk(2000);
+    drv_motor_brake();
+    tk_dly_tsk(200);
+
+    turn_l = 0, turn_r = 0;
     drv_encoder_get_snapshot(&turn_l, &turn_r);
     tm_printf((UB *)"  --> BRAKED: Left Ticks = %ld, Right Ticks = %ld\n", (long)turn_l, (long)turn_r);
 

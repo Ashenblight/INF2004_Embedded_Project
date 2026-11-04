@@ -18,12 +18,12 @@
 #define REG_PADS_GPIO(pin) (*(volatile uint32_t *)(RP2040_PADS_BANK0_BASE + 0x04UL + ((uint32_t)(pin) * 4UL)))
 #define REG_SIO_GPIO_IN (*(volatile uint32_t *)(RP2040_SIO_BASE + 0x04UL))
 
-/* IO_BANK0 Interrupt Registers (Core 0 PROC0) */
+/* Corrected IO_BANK0 Interrupt Registers (Core 0 PROC0) */
 #define REG_IO_INTR0 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x0F0UL))
 #define REG_IO_INTR1 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x0F4UL))
 #define REG_IO_PROC0_INTE0 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x100UL))
-#define REG_IO_PROC0_INTS0 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x120UL)) /* Corrected offset */
-#define REG_IO_PROC0_INTS1 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x124UL)) /* Corrected offset */
+#define REG_IO_PROC0_INTS0 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x120UL)) /* Corrected from 0x178 */
+#define REG_IO_PROC0_INTS1 (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x124UL)) /* Corrected from 0x17C */
 
 /* ARM Cortex-M0+ System Control & NVIC */
 #define REG_VTOR (*(volatile uint32_t *)(RP2040_PPB_BASE + 0xED08UL))
@@ -68,7 +68,7 @@ static inline void cpu_irq_restore(uint32_t primask)
     __asm__ volatile("msr PRIMASK, %0" ::"r"(primask) : "memory");
 }
 
-/* Hardware NVIC ISR for IO_IRQ_BANK0 */
+/* Hardware ISR executed on every encoder transition */
 void isr_io_bank0_handler(UINT dintno)
 {
     (void)dintno;
@@ -76,7 +76,7 @@ void isr_io_bank0_handler(UINT dintno)
     const uint32_t ints1 = REG_IO_PROC0_INTS1;
     const uint32_t gpio_in = REG_SIO_GPIO_IN;
 
-    /* Service Left Encoder (GP1, GP3) */
+    /* Left Wheel Encoder (GP1, GP3) */
     const uint32_t left_mask = (0x0CUL << (PIN_ENC_LEFT_A * 4U)) | (0x0CUL << (PIN_ENC_LEFT_B * 4U));
     if ((ints0 & left_mask) != 0UL)
     {
@@ -88,7 +88,7 @@ void isr_io_bank0_handler(UINT dintno)
         REG_IO_INTR0 = left_mask; /* Acknowledge & clear */
     }
 
-    /* Service Right Encoder (GP5, GP7) */
+    /* Right Wheel Encoder (GP5, GP7) */
     const uint32_t right_mask = (0x0CUL << (PIN_ENC_RIGHT_A * 4U)) | (0x0CUL << (PIN_ENC_RIGHT_B * 4U));
     if ((ints0 & right_mask) != 0UL)
     {
@@ -122,12 +122,12 @@ void drv_encoder_init(void)
     REG_PADS_GPIO(PIN_ENC_RIGHT_A) = PAD_IE_PUE;
     REG_PADS_GPIO(PIN_ENC_RIGHT_B) = PAD_IE_PUE;
 
-    /* 2. Read initial Gray code states */
+    /* 2. Read baseline Gray code states */
     const uint32_t gpio_in = REG_SIO_GPIO_IN;
     s_left_prev = (uint8_t)((((gpio_in >> PIN_ENC_LEFT_A) & 1U) << 1U) | (((gpio_in >> PIN_ENC_LEFT_B) & 1U)));
     s_right_prev = (uint8_t)((((gpio_in >> PIN_ENC_RIGHT_A) & 1U) << 1U) | (((gpio_in >> PIN_ENC_RIGHT_B) & 1U)));
 
-    /* 3. Enable EDGE_LOW and EDGE_HIGH interrupts for encoders */
+    /* 3. Enable edge transitions in GPIO peripheral */
     const uint32_t edge_mask = (0x0CUL << (PIN_ENC_LEFT_A * 4U)) |
                                (0x0CUL << (PIN_ENC_LEFT_B * 4U)) |
                                (0x0CUL << (PIN_ENC_RIGHT_A * 4U)) |
@@ -137,18 +137,16 @@ void drv_encoder_init(void)
     /* 4. Clear pending interrupts */
     REG_NVIC_ICPR = (1UL << IO_IRQ_BANK0);
 
-    /* 5. Hook the ISR directly into the Cortex-M0+ Vector Table in RAM */
-    uint32_t *vtor_table = (uint32_t *)REG_VTOR;
-    if (vtor_table != NULL)
+    /* 5. Direct Vector Table Linkage in RAM */
+    uint32_t *vtor = (uint32_t *)REG_VTOR;
+    if (vtor != NULL)
     {
-        vtor_table[16U + IO_IRQ_BANK0] = (uint32_t)isr_io_bank0_handler;
+        vtor[16U + IO_IRQ_BANK0] = (uint32_t)isr_io_bank0_handler;
     }
 
-    /* Also register via uT-Kernel API */
     T_DINT dint = {
         .intatr = TA_HLNG,
         .inthdr = (FP)isr_io_bank0_handler};
-    tk_def_int(16U + IO_IRQ_BANK0, &dint);
     tk_def_int(IO_IRQ_BANK0, &dint);
 
     /* 6. Unmask NVIC IRQ line 13 */
@@ -162,7 +160,7 @@ void drv_encoder_get_snapshot(int32_t *const p_left_ticks, int32_t *const p_righ
     const uint32_t status = cpu_irq_disable();
     const uint32_t gpio_in = REG_SIO_GPIO_IN;
 
-    /* Fallback Polling: Decodes transitions even if interrupts are masked */
+    /* Fallback Polling: Ensures slow manual turning always registers */
     const uint8_t curr_l = (uint8_t)((((gpio_in >> PIN_ENC_LEFT_A) & 1U) << 1U) |
                                      (((gpio_in >> PIN_ENC_LEFT_B) & 1U)));
     const uint8_t idx_l = (uint8_t)((s_left_prev << 2U) | curr_l);
