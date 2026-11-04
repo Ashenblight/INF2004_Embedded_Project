@@ -122,4 +122,15 @@ void motion_get_status(motion_status_packed_t *p_out_status);
 // s_latest_steering_offset getter function prototype
 int8_t motion_get_steering_offset(void);
 
+#if APP_TEST
+/* ========================================================================= */
+/* Public API Live Actuator Demonstration                                    */
+/* ========================================================================= */
+/**
+ * @brief Live demonstration testing public APIs (Forward, Reverse, Turns)
+ *        for 5 seconds each. Compiled only when TEST=1 is passed.
+ */
+void run_live_actuator_demonstration_api(void);
+#endif /* APP_TEST */
+
 #endif /* SUBSYSTEM2_H */

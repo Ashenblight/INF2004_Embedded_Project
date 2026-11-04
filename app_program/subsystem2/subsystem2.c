@@ -353,7 +353,7 @@ static void motion_control_task(INT stacd, void *p_exinf)
 
         case MOTION_STATE_CONTINUOUS:
         {
-            /* Poll for in-flight override commands */
+            /* 1. Poll for in-flight stop or override commands */
             motion_command_packed_t override_cmd;
             if (s_mbf_motion_cmds > 0 &&
                 tk_rcv_mbf(s_mbf_motion_cmds, (void *)&override_cmd, TMO_POL) > 0)
@@ -362,40 +362,33 @@ static void motion_control_task(INT stacd, void *p_exinf)
                 break;
             }
 
-            /* Sub-tick fractional accumulator for smooth 1-2 cm/s crawl */
-            static int32_t s_target_millitick_accum = 0;
-            const int32_t target_milliticks = (CRUISE_SPEED_MILLITICKS_10MS * (int32_t)s_active_speed_duty) / 50;
-            s_target_millitick_accum += target_milliticks;
-
-            const int32_t target_ticks = s_target_millitick_accum / 1000;
-            s_target_millitick_accum %= 1000;
-
-            if (line_mode)
-            {
-                const int32_t requested_steer = (int32_t)s_latest_steering_offset * 35;
-                if (requested_steer != 0)
-                    line_steer_pwm = requested_steer;
-                else if (line_steer_pwm > LINE_STEER_RETURN_STEP_PWM)
-                    line_steer_pwm -= LINE_STEER_RETURN_STEP_PWM;
-                else if (line_steer_pwm < -LINE_STEER_RETURN_STEP_PWM)
-                    line_steer_pwm += LINE_STEER_RETURN_STEP_PWM;
-                else
-                    line_steer_pwm = 0;
-
-                /* Use a base PWM and current feedback without carrying speed error forward. */
-                integ_l = 0;
-                integ_r = 0;
-                drv_motor_set_speed(line_drive_pwm(target_ticks, delta_l, line_steer_pwm),
-                                    line_drive_pwm(target_ticks, delta_r, -line_steer_pwm));
-                break;
-            }
-
+            /* 2. Compute target ticks dynamically based on commanded duty */
+            const int32_t target_ticks = (int32_t)((TARGET_BASE_CRUISE_TICKS * s_active_speed_duty) / 50u);
             const int32_t err_l = target_ticks - delta_l;
             const int32_t err_r = target_ticks - delta_r;
 
-            integ_l += err_l;
-            integ_r += err_r;
+            /* 3. Conditional Integration (Anti-Windup):
+             *    Only integrate when speed is close to target (|err| <= 2).
+             *    If accelerating from standstill or overshooting, bleed accumulation. */
+            if (err_l >= -2 && err_l <= 2)
+            {
+                integ_l += err_l;
+            }
+            else
+            {
+                integ_l = (integ_l * 85) / 100; /* 15% leak per 10 ms */
+            }
 
+            if (err_r >= -2 && err_r <= 2)
+            {
+                integ_r += err_r;
+            }
+            else
+            {
+                integ_r = (integ_r * 85) / 100; /* 15% leak per 10 ms */
+            }
+
+            /* 4. Strict anti-windup clamping */
             if (integ_l > INTEGRAL_CLAMP)
                 integ_l = INTEGRAL_CLAMP;
             if (integ_l < -INTEGRAL_CLAMP)
@@ -405,14 +398,30 @@ static void motion_control_task(INT stacd, void *p_exinf)
             if (integ_r < -INTEGRAL_CLAMP)
                 integ_r = -INTEGRAL_CLAMP;
 
-            int32_t out_l = (err_l * KP_SPEED) + (integ_l * KI_SPEED);
-            int32_t out_r = (err_r * KP_SPEED) + (integ_r * KI_SPEED);
+            /* 5. Feedforward Base PWM + PID Correction:
+             *    Provides a stable baseline (~2200 PWM at 35% duty) so
+             *    the integral accumulator does not have to do all the work. */
+            const int32_t ff_pwm = ((int32_t)s_active_speed_duty * 2500) / 40;
+            int32_t out_l = ff_pwm + (err_l * KP_SPEED) + (integ_l * KI_SPEED);
+            int32_t out_r = ff_pwm + (err_r * KP_SPEED) + (integ_r * KI_SPEED);
 
-            /* Deadband compensation: ensure motor receives enough voltage to roll */
-            if (out_l > 0 && out_l < MOTOR_DEADBAND_MIN_PWM)
-                out_l = MOTOR_DEADBAND_MIN_PWM;
-            if (out_r > 0 && out_r < MOTOR_DEADBAND_MIN_PWM)
-                out_r = MOTOR_DEADBAND_MIN_PWM;
+            /* Clamp outputs to motor PWM limits */
+            if (out_l > 12500)
+                out_l = 12500;
+            if (out_l < 0)
+                out_l = 0;
+            if (out_r > 12500)
+                out_r = 12500;
+            if (out_r < 0)
+                out_r = 0;
+
+            /* 6. Lateral steering offset (Subsystem 3 line-following) */
+            if (s_line_mode_authorized)
+            {
+                const int32_t steer = (int32_t)s_latest_steering_offset * 40;
+                out_l += steer;
+                out_r -= steer;
+            }
 
             drv_motor_set_speed((int16_t)out_l, (int16_t)out_r);
             break;
@@ -420,6 +429,16 @@ static void motion_control_task(INT stacd, void *p_exinf)
 
         case MOTION_STATE_MANOEUVRE:
         {
+            /* 1. Poll for in-flight stop or override commands */
+            motion_command_packed_t override_cmd;
+            if (s_mbf_motion_cmds > 0 &&
+                tk_rcv_mbf(s_mbf_motion_cmds, (void *)&override_cmd, TMO_POL) > 0)
+            {
+                parse_and_apply_command(&override_cmd);
+                break;
+            }
+
+            /* 2. Step magnitude with absolute deltas so reverse ticks count up */
             const int32_t step_mag = ((delta_l >= 0 ? delta_l : -delta_l) +
                                       (delta_r >= 0 ? delta_r : -delta_r)) /
                                      2;
@@ -437,20 +456,23 @@ static void motion_control_task(INT stacd, void *p_exinf)
             }
             else
             {
-                const int16_t drive_pwm = (int16_t)((s_active_speed_duty * 12500u) / 100u);
+                /* Map duty (20-50%) into calibrated crawl window (1800-2200 PWM) */
+                const int16_t straight_pwm = (int16_t)(1750 + (((int32_t)s_active_speed_duty * 12)));
+                const int16_t turn_pwm = (int16_t)(1650 + (((int32_t)s_active_speed_duty * 10)));
+
                 switch (s_manoeuvre_dir)
                 {
                 case MANOEUVRE_DIR_FWD:
-                    drv_motor_set_speed(drive_pwm, drive_pwm);
+                    drv_motor_set_speed(straight_pwm, straight_pwm);
                     break;
                 case MANOEUVRE_DIR_BWD:
-                    drv_motor_set_speed(-drive_pwm, -drive_pwm);
+                    drv_motor_set_speed(-straight_pwm, -straight_pwm);
                     break;
                 case MANOEUVRE_DIR_TURN_CW:
-                    drv_motor_set_speed(drive_pwm, -drive_pwm);
+                    drv_motor_set_speed(turn_pwm, -turn_pwm);
                     break;
                 case MANOEUVRE_DIR_TURN_CCW:
-                    drv_motor_set_speed(-drive_pwm, drive_pwm);
+                    drv_motor_set_speed(-turn_pwm, turn_pwm);
                     break;
                 }
             }

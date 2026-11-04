@@ -51,93 +51,118 @@ static motion_command_packed_t test_pop_queue(void)
 }
 
 /* ========================================================================= */
-/* Live Motor Actuator & Wheel Encoder Verification Routine                  */
+/* Public API Live Actuator Demonstration (Compiled with standard make -j8)  */
 /* ========================================================================= */
-static void run_live_actuator_demonstration(void)
+
+EXPORT void run_live_actuator_demonstration_api(void)
 {
-    tm_printf((UB *)"\n=======================================================\n");
-    tm_printf((UB *)"   Subsystem 2: Live Actuator & Encoder Verification  \n");
-    tm_printf((UB *)"=======================================================\n");
+    tm_printf((UB *)"\n==================================================\n");
+    tm_printf((UB *)"  SUBSYSTEM 2: PUBLIC API LIVE ACTUATOR DEMO      \n");
+    tm_printf((UB *)"  Duration: 5.0s per manoeuvre                    \n");
+    tm_printf((UB *)"==================================================\n");
 
-    /* In run_live_actuator_demonstration(): */
+    tk_dly_tsk(500);
 
-    /* 1. Drive Forward at ~1.5 - 2 cm/s */
-    tm_printf((UB *)"\n[DEMO 1] Driving FORWARD for 2.0s (~1.5 to 2 cm/s)...\n");
-    drv_encoder_reset();
-    drv_motor_set_speed(1850, 1850);
-    tk_dly_tsk(2000);
-    drv_motor_brake();
-    tk_dly_tsk(200);
+    /* --------------------------------------------------------------------- */
+    /* 1. Drive FORWARD for 5.0s                                             */
+    /* --------------------------------------------------------------------- */
+    tm_printf((UB *)"\n[DEMO 1/4] Driving FORWARD for 5.0s...\n");
+    motion_reset_odometry();
+    motion_start_continuous(30u);
 
-    int32_t fwd_l = 0, fwd_r = 0;
-    drv_encoder_get_snapshot(&fwd_l, &fwd_r);
-    tm_printf((UB *)"  --> BRAKED: Left Ticks = %ld, Right Ticks = %ld\n", (long)fwd_l, (long)fwd_r);
-
-    /* 2. Drive Backward at ~1.5 - 2 cm/s */
-    tm_printf((UB *)"\n[DEMO 2] Driving BACKWARD for 2.0s (~1.5 to 2 cm/s)...\n");
-    drv_encoder_reset();
-    drv_motor_set_speed(-1850, -1850);
-    tk_dly_tsk(2000);
-    drv_motor_brake();
-    tk_dly_tsk(200);
-
-    int32_t bwd_l = 0, bwd_r = 0;
-    drv_encoder_get_snapshot(&bwd_l, &bwd_r);
-    tm_printf((UB *)"  --> BRAKED: Left Ticks = %ld, Right Ticks = %ld\n", (long)bwd_l, (long)bwd_r);
-
-    /* 3.1. In-Place Point Turn LEFT at Gentle Speed */
-    tm_printf((UB *)"\n[DEMO 3] Point Turn LEFT (CCW) for 0.8s...\n");
-    drv_encoder_reset();
-    drv_motor_set_speed(-1850, 1850);
-    tk_dly_tsk(2000);
-    drv_motor_brake();
-    tk_dly_tsk(200);
-
-    int32_t turn_l = 0, turn_r = 0;
-    drv_encoder_get_snapshot(&turn_l, &turn_r);
-    tm_printf((UB *)"  --> BRAKED: Left Ticks = %ld, Right Ticks = %ld\n", (long)turn_l, (long)turn_r);
-
-    /* 3.2. In-Place Point Turn RIGHT at Gentle Speed */
-    tm_printf((UB *)"\n[DEMO 3] Point Turn RIGHT (CCW) for 0.8s...\n");
-    drv_encoder_reset();
-    drv_motor_set_speed(1850, -1850);
-    tk_dly_tsk(2000);
-    drv_motor_brake();
-    tk_dly_tsk(200);
-
-    turn_l = 0, turn_r = 0;
-    drv_encoder_get_snapshot(&turn_l, &turn_r);
-    tm_printf((UB *)"  --> BRAKED: Left Ticks = %ld, Right Ticks = %ld\n", (long)turn_l, (long)turn_r);
-
-    /* 4. Live Hand-Spin Monitor (Rotate wheels by hand to see live ticks) */
-    tm_printf((UB *)"\n[DEMO 4] Entering Continuous Live Tick Monitoring...\n");
-    tm_printf((UB *)"         (Rotate wheels by hand to verify hardware ticks!)\n\n");
-    drv_encoder_reset();
-
-    int32_t last_l = -99999;
-    int32_t last_r = -99999;
-    uint32_t loops = 0;
-
-    /* Monitor for 30 seconds or indefinitely */
-    while (loops < 150)
+    for (int sec = 1; sec <= 5; sec++)
     {
-        int32_t cur_l = 0;
-        int32_t cur_r = 0;
-        drv_encoder_get_snapshot(&cur_l, &cur_r);
-
-        if (cur_l != last_l || cur_r != last_r)
-        {
-            tm_printf((UB *)"  [LIVE TICKS] Left: %6ld  |  Right: %6ld\n", (long)cur_l, (long)cur_r);
-            last_l = cur_l;
-            last_r = cur_r;
-        }
-
-        tk_dly_tsk(200);
-        loops++;
+        tk_dly_tsk(1000);
+        int32_t cur_l = 0, cur_r = 0;
+        motion_get_odometry(&cur_l, &cur_r);
+        tm_printf((UB *)"  [t=%d s] L_Ticks=%ld, R_Ticks=%ld\n", sec, (long)cur_l, (long)cur_r);
     }
 
-    drv_motor_brake();
-    tm_printf((UB *)"\n[DONE] Demo sequence completed. Resuming RTOS runtime.\n\n");
+    motion_emergency_stop();
+    tk_dly_tsk(200);
+    motion_clear_emergency_stop();
+    tk_dly_tsk(1000);
+
+    /* --------------------------------------------------------------------- */
+    /* 2. Drive BACKWARD for 5.0s                                            */
+    /* --------------------------------------------------------------------- */
+    tm_printf((UB *)"\n[DEMO 2/4] Driving BACKWARD for 5.0s...\n");
+    motion_reset_odometry();
+
+    for (int sec = 1; sec <= 5; sec++)
+    {
+        motion_status_packed_t status = {0};
+        motion_get_status(&status);
+        if (status.state != MOTION_STATE_MANOEUVRE)
+        {
+            motion_move_backward(1000u, 30u);
+        }
+
+        tk_dly_tsk(1000);
+        int32_t cur_l = 0, cur_r = 0;
+        motion_get_odometry(&cur_l, &cur_r);
+        tm_printf((UB *)"  [t=%d s] L_Ticks=%ld, R_Ticks=%ld\n", sec, (long)cur_l, (long)cur_r);
+    }
+
+    motion_emergency_stop();
+    tk_dly_tsk(200);
+    motion_clear_emergency_stop();
+    tk_dly_tsk(1000);
+
+    /* --------------------------------------------------------------------- */
+    /* 3. Point Turn LEFT for 5.0s                                           */
+    /* --------------------------------------------------------------------- */
+    tm_printf((UB *)"\n[DEMO 3/4] Point Turn LEFT for 5.0s...\n");
+    motion_reset_odometry();
+
+    for (int sec = 1; sec <= 5; sec++)
+    {
+        motion_status_packed_t status = {0};
+        motion_get_status(&status);
+        if (status.state != MOTION_STATE_MANOEUVRE)
+        {
+            motion_point_turn(-180, 30u);
+        }
+
+        tk_dly_tsk(1000);
+        int32_t cur_l = 0, cur_r = 0;
+        motion_get_odometry(&cur_l, &cur_r);
+        tm_printf((UB *)"  [t=%d s] L_Ticks=%ld, R_Ticks=%ld\n", sec, (long)cur_l, (long)cur_r);
+    }
+
+    motion_emergency_stop();
+    tk_dly_tsk(200);
+    motion_clear_emergency_stop();
+    tk_dly_tsk(1000);
+
+    /* --------------------------------------------------------------------- */
+    /* 4. Point Turn RIGHT for 5.0s                                          */
+    /* --------------------------------------------------------------------- */
+    tm_printf((UB *)"\n[DEMO 4/4] Point Turn RIGHT for 5.0s...\n");
+    motion_reset_odometry();
+
+    for (int sec = 1; sec <= 5; sec++)
+    {
+        motion_status_packed_t status = {0};
+        motion_get_status(&status);
+        if (status.state != MOTION_STATE_MANOEUVRE)
+        {
+            motion_point_turn(180, 30u);
+        }
+
+        tk_dly_tsk(1000);
+        int32_t cur_l = 0, cur_r = 0;
+        motion_get_odometry(&cur_l, &cur_r);
+        tm_printf((UB *)"  [t=%d s] L_Ticks=%ld, R_Ticks=%ld\n", sec, (long)cur_l, (long)cur_r);
+    }
+
+    motion_emergency_stop();
+    tk_dly_tsk(200);
+    motion_clear_emergency_stop();
+
+    tm_printf((UB *)"\n==================================================\n");
+    tm_printf((UB *)"  DEMONSTRATION COMPLETE: ALL TESTS 5.0s          \n");
+    tm_printf((UB *)"==================================================\n\n");
 }
 
 /* ========================================================================= */
@@ -666,8 +691,8 @@ EXPORT void subsystem2_test(void)
 
     TEST_SUMMARY("subsystem2");
 
-    /* Transition to Interactive Hardware Diagnostics Shell */
-    run_live_actuator_demonstration();
+    /* Trigger the live 5-second public API demo during the test run */
+    run_live_actuator_demonstration_api();
 }
 
 #endif /* APP_TEST */
