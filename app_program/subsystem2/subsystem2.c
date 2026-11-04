@@ -10,7 +10,7 @@
 #include "drv_motor.h"
 #include "drv_encoder.h"
 
-#define TARGET_BASE_CRUISE_TICKS (3) /* Reduced to 3 ticks (~5 cm/s) */
+#define TARGET_BASE_CRUISE_TICKS (1) /* Reduced to 3 ticks (~5 cm/s) */
 #define KP_SPEED (320)
 #define KI_SPEED (35)
 #define INTEGRAL_CLAMP (150)
@@ -22,6 +22,11 @@
 #define FLAG_STOP_CLEAR (0x00000002u)
 #define FLAG_STOPPED_CONFIRMED (0x00000002u) /* Sylvester FLG_CONTROLLER */
 #define FLAG_MOVEMENT_COMPLETE (0x00000004u) /* Sylvester FLG_CONTROLLER */
+
+/* Base cruise setting: 1200 milliticks per 10 ms = 1.2 ticks/10 ms = 2.0 cm/s */
+/* (Change to 600 for 1.0 cm/s) */
+#define CRUISE_SPEED_MILLITICKS_10MS (1200)
+#define MOTOR_DEADBAND_MIN_PWM (1750) /* Minimum torque to overcome gearbox stiction */
 
 /* Compatibility handles for Subsystems 3 & 4 */
 EXPORT ID sem_slots = 0;
@@ -332,7 +337,7 @@ static void motion_control_task(INT stacd, void *p_exinf)
 
         case MOTION_STATE_CONTINUOUS:
         {
-            /* Poll for in-flight stop or manoeuvre override */
+            /* Poll for in-flight override commands */
             motion_command_packed_t override_cmd;
             if (s_mbf_motion_cmds > 0 &&
                 tk_rcv_mbf(s_mbf_motion_cmds, (void *)&override_cmd, TMO_POL) > 0)
@@ -341,14 +346,20 @@ static void motion_control_task(INT stacd, void *p_exinf)
                 break;
             }
 
-            const int32_t target_ticks = (int32_t)((TARGET_BASE_CRUISE_TICKS * s_active_speed_duty) / 50u);
+            /* Sub-tick fractional accumulator for smooth 1-2 cm/s crawl */
+            static int32_t s_target_millitick_accum = 0;
+            const int32_t target_milliticks = (CRUISE_SPEED_MILLITICKS_10MS * (int32_t)s_active_speed_duty) / 50;
+            s_target_millitick_accum += target_milliticks;
+
+            const int32_t target_ticks = s_target_millitick_accum / 1000;
+            s_target_millitick_accum %= 1000;
+
             const int32_t err_l = target_ticks - delta_l;
             const int32_t err_r = target_ticks - delta_r;
 
             integ_l += err_l;
             integ_r += err_r;
 
-            /* Integral Anti-Windup Clamping */
             if (integ_l > INTEGRAL_CLAMP)
                 integ_l = INTEGRAL_CLAMP;
             if (integ_l < -INTEGRAL_CLAMP)
@@ -358,32 +369,23 @@ static void motion_control_task(INT stacd, void *p_exinf)
             if (integ_r < -INTEGRAL_CLAMP)
                 integ_r = -INTEGRAL_CLAMP;
 
-            int16_t pwm_l = (int16_t)((err_l * KP_SPEED) + (integ_l * KI_SPEED));
-            int16_t pwm_r = (int16_t)((err_r * KP_SPEED) + (integ_r * KI_SPEED));
+            int32_t out_l = (err_l * KP_SPEED) + (integ_l * KI_SPEED);
+            int32_t out_r = (err_r * KP_SPEED) + (integ_r * KI_SPEED);
 
-            /* Mode-Gated Lateral Steering Offset */
+            /* Deadband compensation: ensure motor receives enough voltage to roll */
+            if (out_l > 0 && out_l < MOTOR_DEADBAND_MIN_PWM)
+                out_l = MOTOR_DEADBAND_MIN_PWM;
+            if (out_r > 0 && out_r < MOTOR_DEADBAND_MIN_PWM)
+                out_r = MOTOR_DEADBAND_MIN_PWM;
+
             if (s_line_mode_authorized)
             {
-                const int16_t steer = (int16_t)(s_latest_steering_offset * 65);
-                pwm_l += steer;
-                pwm_r -= steer;
+                const int32_t steer = (int32_t)s_latest_steering_offset * 35;
+                out_l += steer;
+                out_r -= steer;
             }
 
-            drv_motor_set_speed(pwm_l, pwm_r);
-
-            /* Motor Stall Detection */
-            if ((pwm_l > 4000 || pwm_r > 4000) && (delta_l == 0 && delta_r == 0))
-            {
-                stall_counter++;
-                if (stall_counter > 50u)
-                { /* Stalled for 500 ms */
-                    s_current_state = MOTION_STATE_FAULT;
-                }
-            }
-            else
-            {
-                stall_counter = 0u;
-            }
+            drv_motor_set_speed((int16_t)out_l, (int16_t)out_r);
             break;
         }
 
