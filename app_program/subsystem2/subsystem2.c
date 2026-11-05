@@ -27,6 +27,7 @@
 /* (Change to 600 for 1.0 cm/s) */
 #define CRUISE_SPEED_MILLITICKS_10MS (1200)
 #define MOTOR_DEADBAND_MIN_PWM (1750) /* Minimum torque to overcome gearbox stiction */
+#define LINE_STEER_RETURN_STEP_PWM (175)
 
 /* Compatibility handles for Subsystems 3 & 4 */
 EXPORT ID sem_slots = 0;
@@ -267,6 +268,14 @@ static void parse_and_apply_command(const motion_command_packed_t *cmd)
     }
 }
 
+static int16_t line_drive_pwm(int32_t target_ticks, int8_t measured_ticks, int32_t steering_pwm)
+{
+    /* Reverse counts mean no forward progress during line following. */
+    const int32_t forward_ticks = (measured_ticks > 0) ? measured_ticks : 0;
+    const int32_t pwm = MOTOR_DEADBAND_MIN_PWM + KP_SPEED * (target_ticks - forward_ticks) + steering_pwm;
+    return (pwm > 0) ? (int16_t)pwm : 0;
+}
+
 static void motion_control_task(INT stacd, void *p_exinf)
 {
     (void)stacd;
@@ -276,6 +285,7 @@ static void motion_control_task(INT stacd, void *p_exinf)
     int32_t last_r = 0;
     int32_t integ_l = 0;
     int32_t integ_r = 0;
+    int32_t line_steer_pwm = 0;
     uint32_t brake_timer = 0u;
     uint32_t stall_counter = 0u;
 
@@ -316,6 +326,12 @@ static void motion_control_task(INT stacd, void *p_exinf)
             }
         }
 
+        const bool line_mode = s_line_mode_authorized;
+        if (!line_mode || s_current_state != MOTION_STATE_CONTINUOUS)
+        {
+            line_steer_pwm = 0;
+        }
+
         /* State Machine Dispatcher */
         switch (s_current_state)
         {
@@ -354,6 +370,26 @@ static void motion_control_task(INT stacd, void *p_exinf)
             const int32_t target_ticks = s_target_millitick_accum / 1000;
             s_target_millitick_accum %= 1000;
 
+            if (line_mode)
+            {
+                const int32_t requested_steer = (int32_t)s_latest_steering_offset * 35;
+                if (requested_steer != 0)
+                    line_steer_pwm = requested_steer;
+                else if (line_steer_pwm > LINE_STEER_RETURN_STEP_PWM)
+                    line_steer_pwm -= LINE_STEER_RETURN_STEP_PWM;
+                else if (line_steer_pwm < -LINE_STEER_RETURN_STEP_PWM)
+                    line_steer_pwm += LINE_STEER_RETURN_STEP_PWM;
+                else
+                    line_steer_pwm = 0;
+
+                /* Use a base PWM and current feedback without carrying speed error forward. */
+                integ_l = 0;
+                integ_r = 0;
+                drv_motor_set_speed(line_drive_pwm(target_ticks, delta_l, line_steer_pwm),
+                                    line_drive_pwm(target_ticks, delta_r, -line_steer_pwm));
+                break;
+            }
+
             const int32_t err_l = target_ticks - delta_l;
             const int32_t err_r = target_ticks - delta_r;
 
@@ -377,13 +413,6 @@ static void motion_control_task(INT stacd, void *p_exinf)
                 out_l = MOTOR_DEADBAND_MIN_PWM;
             if (out_r > 0 && out_r < MOTOR_DEADBAND_MIN_PWM)
                 out_r = MOTOR_DEADBAND_MIN_PWM;
-
-            if (s_line_mode_authorized)
-            {
-                const int32_t steer = (int32_t)s_latest_steering_offset * 35;
-                out_l += steer;
-                out_r -= steer;
-            }
 
             drv_motor_set_speed((int16_t)out_l, (int16_t)out_r);
             break;
