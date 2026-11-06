@@ -5,6 +5,7 @@
 
 #define S4_EVENT_QUEUE_SIZE 16
 
+/* Queue of terrain events awaiting transmission. */
 typedef struct {
     UB data[S4_EVENT_QUEUE_SIZE];
     UW head;
@@ -28,3 +29,5 @@ IMPORT BOOL s4_event_queue_peek(
 IMPORT void s4_event_queue_pop(S4_EVENT_QUEUE *queue);
 
 #endif
+
+/*** end of file ***/

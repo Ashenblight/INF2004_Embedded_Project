@@ -5,19 +5,19 @@
 #include "imu_driver.h"
 #include "../../device/include/dev_i2c.h"
 
-/* LSM303DLHC accelerometer address */
+/* LSM303DLHC accelerometer address. */
 #define IMU_ACCEL_ADDR       0x19
 
-/* Accelerometer registers */
+/* Accelerometer registers. */
 #define IMU_CTRL_REG1_A      0x20
 #define IMU_CTRL_REG4_A      0x23
 #define IMU_OUT_X_L_A        0x28
 
 /*
- * CTRL_REG1_A = 0x47
+ * CTRL_REG1_A = 0x47.
  * 50 Hz output rate, all three axes enabled.
  *
- * CTRL_REG4_A = 0x88
+ * CTRL_REG4_A = 0x88.
  * Block data update enabled.
  * High-resolution mode, +/-2g measurement range.
  */
@@ -28,10 +28,10 @@
 LOCAL ID imu_dd = -1;
 
 /*
- * convert two register bytes to signed acceleration.
+ * Convert two register bytes to signed acceleration.
  *
- * in high-resolution mode, the 12-bit result is
- * left-aligned in the 16-bit output registers.
+ * In high-resolution mode, the 12-bit result is left-aligned in the 16-bit
+ * output registers.
  *
  * At +/-2g, one count is approximately 1 mg.
  */
@@ -48,10 +48,10 @@ LOCAL H imu_decode_axis(UB low, UB high)
 }
 
 /*
- * initialise the accelerometer.
+ * Initialize the accelerometer.
  *
- * returns E_OK if communication and configuration
- * succeed, otherwise returns an error code.
+ * Return E_OK if communication and configuration succeed; otherwise, return
+ * an error code.
  */
 EXPORT ER imu_driver_init(void)
 {
@@ -115,9 +115,10 @@ failed:
 }
 
 /*
- * read all three acceleration axes in one transaction.
+ * Read all three acceleration axes in one transaction.
  *
- * the auto-increment bit allows six consecutive register bytes to be read together.
+ * The auto-increment bit allows six consecutive register bytes to be read
+ * together.
  */
 EXPORT ER imu_driver_read_accel(IMU_ACCEL_SAMPLE *sample)
 {
@@ -167,3 +168,5 @@ EXPORT void imu_driver_close(void)
         imu_dd = -1;
     }
 }
+
+/*** end of file ***/

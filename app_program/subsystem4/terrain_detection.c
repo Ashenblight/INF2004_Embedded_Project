@@ -1,11 +1,10 @@
 /*
- * uses filtered IMU pitch measurements.
+ * Use filtered IMU pitch measurements.
  *
- * hysteresis prevents rapid switching
- * between terrain states near a threshold.
+ * Hysteresis prevents rapid switching between terrain states near a threshold.
  *
- * consecutive-sample confirmation reduces
- * false events caused by short sensor noise.
+ * Consecutive-sample confirmation reduces false events caused by brief sensor
+ * noise.
  */
 
 #include "terrain_detection.h"
@@ -50,7 +49,8 @@ EXPORT ER terrain_detection_update(
     *events = 0;
 
     /*
-     * invalid readings may be caused by communication errors or unreliable and acceleration measurements.
+     * Invalid readings may result from communication errors or unreliable
+     * acceleration measurements.
      */
     if (!valid) {
         detector->recovery_count = 0;
@@ -73,10 +73,12 @@ EXPORT ER terrain_detection_update(
         return E_OK;
     }
 
+
+
     detector->invalid_count = 0;
 
     /*
-     * require several consecutive valid samples before declaring recovery.
+     * Require several consecutive valid samples before declaring recovery.
      */
     if (detector->unreliable) {
         if (detector->recovery_count <
@@ -106,9 +108,9 @@ EXPORT ER terrain_detection_update(
     absolute_roll = (roll < 0) ? -roll : roll;
 
     /*
-     * detect excessive tilt.
+     * Detect excessive tilt.
      *
-     * require three consecutive readings before reporting an unsafe condition.
+     * Require three consecutive readings before reporting an unsafe condition.
      */
     if (absolute_pitch >= TERRAIN_UNSAFE_CDEG ||
         absolute_roll >= TERRAIN_UNSAFE_CDEG) {
@@ -150,10 +152,10 @@ EXPORT ER terrain_detection_update(
     }
 
     /*
-     * determine the next terrain state.
+     * Determine the next terrain state.
      *
-     * enter uphill/downhill at 5 degrees.
-     * return to level below 2 degrees.
+     * Enter uphill or downhill at 5 degrees.
+     * Return to level below 2 degrees.
      *
      * The gap provides hysteresis.
      */
@@ -170,7 +172,7 @@ EXPORT ER terrain_detection_update(
     }
 
     /*
-     * confirm the new state across consecutive monitoring cycles.
+     * Confirm the new state across consecutive monitoring cycles.
      */
     if (next_slope != detector->slope) {
 
@@ -210,3 +212,5 @@ EXPORT ER terrain_detection_update(
 
     return E_OK;
 }
+
+/*** end of file ***/

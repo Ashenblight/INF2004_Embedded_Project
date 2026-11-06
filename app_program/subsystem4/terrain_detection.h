@@ -4,26 +4,26 @@
 #include "../app.h"
 
 /*
- * initial thresholds, subject to calibration.
+ * Initial thresholds, subject to calibration.
  */
 #define TERRAIN_ENTER_CDEG        500
 #define TERRAIN_EXIT_CDEG         200
 #define TERRAIN_UNSAFE_CDEG      2500
 #define TERRAIN_SAFE_CDEG        2000
 
-/* consecutive 20 ms samples required */
+/* Number of consecutive 20 ms samples required. */
 #define TERRAIN_CONFIRM_SAMPLES     3
 #define TERRAIN_INVALID_LIMIT       5
 #define TERRAIN_RECOVERY_SAMPLES    5
 
-/* internal terrain states */
+/* Internal terrain states. */
 #define TERRAIN_LEVEL              0
 #define TERRAIN_UPHILL             1
 #define TERRAIN_DOWNHILL           2
 
 /*
- * internal event flags.
- * these are NOT the final binary message codes
+ * Internal event flags.
+ * These are not the final binary message codes.
  */
 #define TERRAIN_EVT_UPHILL        (1U << 0)
 #define TERRAIN_EVT_DOWNHILL      (1U << 1)
@@ -33,7 +33,7 @@
 #define TERRAIN_EVT_INVALID       (1U << 5)
 #define TERRAIN_EVT_RECOVERED     (1U << 6)
 
-/* detector state */
+/* Detector state. */
 typedef struct {
     UB slope;
     UB candidate;
@@ -48,18 +48,18 @@ typedef struct {
     UB unsafe_active;
 } TERRAIN_DETECTOR;
 
-/* initialise the detector. */
+/* Initialize the detector. */
 IMPORT void terrain_detection_reset(
     TERRAIN_DETECTOR *detector
 );
 
 /*
- * process one monitoring cycle.
+ * Process one monitoring cycle.
  *
- * valid: TRUE if imu reading is valid
- * pitch_cdeg: forward/backward tilt
- * roll_cdeg: sideways tilt
- * events: output event flags
+ * valid is TRUE if the IMU reading is valid.
+ * pitch_cdeg is forward/backward tilt.
+ * roll_cdeg is sideways tilt.
+ * events contains the output event flags.
  */
 IMPORT ER terrain_detection_update(
     TERRAIN_DETECTOR *detector,
@@ -70,3 +70,5 @@ IMPORT ER terrain_detection_update(
 );
 
 #endif
+
+/*** end of file ***/

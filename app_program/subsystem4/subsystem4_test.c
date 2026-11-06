@@ -6,6 +6,9 @@
 
 #if APP_TEST
 
+/**
+ * @brief Run the Subsystem 4 unit and integration checks.
+ */
 EXPORT void subsystem4_test(void)
 {
     T_RMBF rmbf;
@@ -14,7 +17,10 @@ EXPORT void subsystem4_test(void)
 
     UB first_event = 0;
     UB second_event = 0;
-    BOOL add1, add2, read1, read2;
+    BOOL add1;
+    BOOL add2;
+    BOOL read1;
+    BOOL read2;
 
     UB packet[S4_PACKET_EVENT_SIZE] = {0};
     UW events = 0;
@@ -24,19 +30,19 @@ EXPORT void subsystem4_test(void)
 
     TEST_INIT();
 
-    /* S4-U01: summary buffer */
+    /* S4-U01: Verify the summary buffer. */
     TEST_CHECK("S4-U01",
         tk_ref_mbf(mbf_summary, &rmbf) == E_OK &&
         rmbf.maxmsz == S4_SUMMARY_MAX,
         "summary buffer size");
 
-    /* S4-U02: terrain event buffer */
+    /* S4-U02: Verify the terrain event buffer. */
     TEST_CHECK("S4-U02",
         tk_ref_mbf(mbf_s4_events, &rmbf) == E_OK &&
         rmbf.maxmsz == S4_PACKET_EVENT_SIZE,
         "terrain packet size");
 
-    /* S4-U03: encode terrain events */
+    /* S4-U03: Encode terrain events. */
     events = TERRAIN_EVT_UPHILL | TERRAIN_EVT_UNSAFE;
 
     TEST_CHECK("S4-U03",
@@ -45,7 +51,7 @@ EXPORT void subsystem4_test(void)
         packet[1] == 0x09,
         "encode packed events");
 
-    /* S4-U04: decode terrain events */
+    /* S4-U04: Decode terrain events. */
     TEST_CHECK("S4-U04",
         terrain_packet_decode(
             packet, S4_PACKET_EVENT_SIZE, &decoded
@@ -53,7 +59,7 @@ EXPORT void subsystem4_test(void)
         decoded == events,
         "decode packed events");
 
-    /* S4-U05: reject wrong version */
+    /* S4-U05: Reject an unsupported version. */
     packet[0] = 0x22;
 
     TEST_CHECK("S4-U05",
@@ -64,14 +70,14 @@ EXPORT void subsystem4_test(void)
 
     packet[0] = 0x12;
 
-    /* S4-U06: reject wrong length */
+    /* S4-U06: Reject an incorrect length. */
     TEST_CHECK("S4-U06",
         terrain_packet_decode(
             packet, 1, &decoded
         ) == E_PAR,
         "reject incorrect length");
 
-    /* S4-U07: reject invalid event bits */
+    /* S4-U07: Reject invalid event bits. */
     packet[1] = 0x80;
 
     TEST_CHECK("S4-U07",
@@ -80,7 +86,7 @@ EXPORT void subsystem4_test(void)
         ) == E_PAR,
         "reject invalid event bits");
 
-    /* S4-U08: detect uphill */
+    /* S4-U08: Detect uphill terrain. */
     terrain_detection_reset(&detector);
 
     for (i = 0; i < TERRAIN_CONFIRM_SAMPLES; i++) {
@@ -94,7 +100,7 @@ EXPORT void subsystem4_test(void)
         (events & TERRAIN_EVT_UPHILL) != 0,
         "detect uphill after 3 samples");
 
-    /* S4-U09: return to level */
+    /* S4-U09: Detect a return to level terrain. */
     for (i = 0; i < TERRAIN_CONFIRM_SAMPLES; i++) {
         terrain_detection_update(
             &detector, TRUE, 0, 0, &events
@@ -106,7 +112,7 @@ EXPORT void subsystem4_test(void)
         (events & TERRAIN_EVT_LEVEL) != 0,
         "detect return to level");
 
-    /* S4-U10: detect unsafe pitch */
+    /* S4-U10: Detect unsafe pitch. */
     terrain_detection_reset(&detector);
 
     for (i = 0; i < TERRAIN_CONFIRM_SAMPLES; i++) {
@@ -120,7 +126,7 @@ EXPORT void subsystem4_test(void)
         (events & TERRAIN_EVT_UNSAFE) != 0,
         "detect unsafe pitch");
 
-    /* S4-U11: detect invalid readings */
+    /* S4-U11: Detect invalid readings. */
     terrain_detection_reset(&detector);
 
     for (i = 0; i < TERRAIN_INVALID_LIMIT; i++) {
@@ -134,7 +140,7 @@ EXPORT void subsystem4_test(void)
         (events & TERRAIN_EVT_INVALID) != 0,
         "detect invalid sensor readings");
 
-    /* S4-U12: detect sensor recovery */
+    /* S4-U12: Detect sensor recovery. */
     for (i = 0; i < TERRAIN_RECOVERY_SAMPLES; i++) {
         terrain_detection_update(
             &detector, TRUE, 0, 0, &events
@@ -146,7 +152,7 @@ EXPORT void subsystem4_test(void)
         (events & TERRAIN_EVT_RECOVERED) != 0,
         "detect sensor recovery");
 
-    /* S4-U13: detect unsafe sideways tilt */
+    /* S4-U13: Detect unsafe sideways tilt. */
     terrain_detection_reset(&detector);
 
     for (i = 0; i < TERRAIN_CONFIRM_SAMPLES; i++) {
@@ -160,7 +166,7 @@ EXPORT void subsystem4_test(void)
         (events & TERRAIN_EVT_UNSAFE) != 0,
         "detect unsafe roll");
 
-    /* S4-U14: stay unsafe above safe threshold */
+    /* S4-U14: Remain unsafe above the safe threshold. */
     for (i = 0; i < TERRAIN_CONFIRM_SAMPLES; i++) {
         terrain_detection_update(
             &detector, TRUE, 0, 2200, &events
@@ -172,7 +178,7 @@ EXPORT void subsystem4_test(void)
         (events & TERRAIN_EVT_SAFE) == 0,
         "remain unsafe above safe threshold");
 
-    /* S4-U15: return to safe */
+    /* S4-U15: Detect a return to a safe state. */
     for (i = 0; i < TERRAIN_CONFIRM_SAMPLES; i++) {
         terrain_detection_update(
             &detector, TRUE, 0, 0, &events
@@ -184,7 +190,7 @@ EXPORT void subsystem4_test(void)
         (events & TERRAIN_EVT_SAFE) != 0,
         "return to safe after 3 samples");
 
-    /* S4-U16: one-wheel lift below slope threshold */
+    /* S4-U16: Detect one-wheel lift below the slope threshold. */
     terrain_detection_reset(&detector);
 
     for (i = 0; i < TERRAIN_CONFIRM_SAMPLES; i++) {
@@ -200,7 +206,7 @@ EXPORT void subsystem4_test(void)
                    TERRAIN_EVT_DOWNHILL)) == 0,
         "wheel lift below slope threshold");
 
-    /* S4-U17: preserve FIFO event order */
+    /* S4-U17: Preserve FIFO event order. */
     s4_event_queue_reset(&test_queue);
 
     add1 = s4_event_queue_push(
@@ -229,14 +235,13 @@ EXPORT void subsystem4_test(void)
         test_queue.count == 1,
         "preserve FIFO event order");
 
-    /* INT-02: subsystem 3 messages */
+    /* INT-02: Record the current Subsystem 3 message count. */
     before = s4_lines_received;
 
-
-    /* S4-U19: FIFO wraparound */
+    /* S4-U19: Verify FIFO wraparound. */
     s4_event_queue_reset(&test_queue);
 
-    /* fill the queue */
+    /* Fill the queue. */
     for (i = 0; i < S4_EVENT_QUEUE_SIZE; i++) {
         if (!s4_event_queue_push(
                 &test_queue, TERRAIN_EVT_UPHILL
@@ -247,14 +252,14 @@ EXPORT void subsystem4_test(void)
 
     add2 = (i == S4_EVENT_QUEUE_SIZE);
 
-    /* free one slot and reuse it */
+    /* Free one slot and reuse it. */
     s4_event_queue_pop(&test_queue);
 
     add1 = s4_event_queue_push(
         &test_queue, TERRAIN_EVT_SAFE
     );
 
-    /* remove the remaining old events */
+    /* Remove the remaining old events. */
     for (i = 0; i < S4_EVENT_QUEUE_SIZE - 1; i++) {
         s4_event_queue_pop(&test_queue);
     }
@@ -270,11 +275,10 @@ EXPORT void subsystem4_test(void)
         test_queue.overflows == 0,
         "FIFO wraparound");
 
-
-    /* S4-U18: detect FIFO queue overflow */
+    /* S4-U18: Detect FIFO queue overflow. */
     s4_event_queue_reset(&test_queue);
 
-    /* fill all 16 queue slots */
+    /* Fill all 16 queue slots. */
     for (i = 0; i < S4_EVENT_QUEUE_SIZE; i++) {
         if (!s4_event_queue_push(
                 &test_queue, TERRAIN_EVT_UPHILL
@@ -283,7 +287,7 @@ EXPORT void subsystem4_test(void)
         }
     }
 
-    /* one more event should be rejected */
+    /* Verify that one additional event is rejected. */
     TEST_CHECK("S4-U18",
         i == S4_EVENT_QUEUE_SIZE &&
         !s4_event_queue_push(
@@ -304,3 +308,5 @@ EXPORT void subsystem4_test(void)
 }
 
 #endif
+
+/*** end of file ***/

@@ -4,8 +4,8 @@
 #include "imu_driver.h"
 
 /*
- * pitch_cdeg: pitch in 0.01 degrees
- * height_um: estimated height in micrometres
+ * pitch_cdeg is pitch in 0.01-degree units.
+ * height_um is the estimated height in micrometres.
  */
 typedef struct {
     W x_filtered_mg;
@@ -23,19 +23,19 @@ typedef struct {
     UB initialized;
 } IMU_PROCESSING_STATE;
 
-/* reset filtering and ramp-height tracking. */
+/* Reset filtering and ramp-height tracking. */
 IMPORT void imu_processing_reset(IMU_PROCESSING_STATE *state);
 
-/* process one accelerometer sample. */
+/* Process one accelerometer sample. */
 IMPORT ER imu_processing_update(
     IMU_PROCESSING_STATE *state,
     const IMU_ACCEL_SAMPLE *sample
 );
 
 /*
- * integrate actual wheel-travel distance.
- * Positive distance = forward travel.
- * Negative distance = reverse travel.
+ * Integrate actual wheel-travel distance.
+ * Positive distance means forward travel; negative distance means reverse
+ * travel.
  */
 IMPORT ER imu_processing_add_travel(
     IMU_PROCESSING_STATE *state,
@@ -43,3 +43,5 @@ IMPORT ER imu_processing_add_travel(
 );
 
 #endif
+
+/*** end of file ***/

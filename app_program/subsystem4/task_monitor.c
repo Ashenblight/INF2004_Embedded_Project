@@ -1,7 +1,6 @@
 /*
- * read accelerometer measurements
- * estimate pitch and detect terrain changes
- * send packed events and report sensor faults
+ * Read accelerometer measurements, estimate pitch, and detect terrain
+ * changes. Send packed events and report sensor faults.
  *
  * target monitoring period: 20 ms
  */
@@ -14,21 +13,20 @@
 #include "terrain_event_queue.h"
 #include <stdint.h>
 
-/* hardware timer */
+/* Hardware timer. */
 extern uint64_t time_us_64(void);
-
-/* i2c timing diagnostics */
-// extern volatile UW s4_i2c_send_max_us;
-// extern volatile UW s4_i2c_recv_max_us;
-
-// extern volatile UW s4_i2c_wake_max_us;
-// extern volatile UW s4_i2c_setflag_max_us;
 
 #define S4_IMU_PERIOD_MS     20
 #define S4_REPORT_INTERVAL  50
 
 EXPORT UW s4_lines_received = 0;
 
+/**
+ * @brief Monitor accelerometer data and report terrain events.
+ *
+ * @param stacd The task start code. It is unused.
+ * @param exinf The task extended information. It is unused.
+ */
 EXPORT void monitor_task(INT stacd, void *exinf)
 {
     IMU_ACCEL_SAMPLE sample = {0};
@@ -42,7 +40,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
     UW pending_events = 0;
     UW fault_bits = 0;
 
-    /* pending terrain events in arrival order */
+    /* Pending terrain events in arrival order. */
     S4_EVENT_QUEUE event_queue = {0};
 
     BOOL sample_valid = FALSE;
@@ -85,7 +83,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
 
         tk_get_tim(&start_time);
 
-        /* initialise or reconnect sensor */
+        /* Initialize or reconnect the sensor. */
         if (!sensor_ready &&
             (cycles % S4_REPORT_INTERVAL == 0)) {
 
@@ -103,7 +101,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
             } else {
                 last_error = er;
 
-                /* report sensor fault */
+                /* Report the sensor fault. */
                 (void)tk_set_flg(
                     flg_s4_faults,
                     S4_FAULT_SENSOR
@@ -111,10 +109,10 @@ EXPORT void monitor_task(INT stacd, void *exinf)
             }
         }
 
-        /* read accelerometer */
+        /* Read accelerometer data. */
         if (sensor_ready) {
 
-            /* measure sensor reading time */
+            /* Measure the sensor read duration. */
             read_start_us = (UW)time_us_64();
 
             er = imu_driver_read_accel(&sample);
@@ -149,7 +147,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
 
                 sensor_ready = FALSE;
 
-                /* report i2c fault */
+                /* Report the I2C fault. */
                 (void)tk_set_flg(
                     flg_s4_faults,
                     S4_FAULT_SENSOR
@@ -160,7 +158,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
             }
         }
 
-        /* detect terrain changes */
+        /* Detect terrain changes. */
         terrain_events = 0;
 
         er = terrain_detection_update(
@@ -175,12 +173,12 @@ EXPORT void monitor_task(INT stacd, void *exinf)
             pending_events |= terrain_events;
 
 
-            /* store events in arrival order */
+            /* Store events in arrival order. */
             if (!s4_event_queue_push(
                     &event_queue,
                     (UB)terrain_events
                 )) {
-                /* report lost terrain event */
+                /* Report the lost terrain event. */
                 tk_set_flg(
                     flg_s4_faults,
                     S4_FAULT_EVENT_OVERFLOW
@@ -188,7 +186,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
             }
 
 
-            /* set fault flags */
+            /* Set the fault flags. */
             fault_bits = 0;
 
             if (terrain_events & TERRAIN_EVT_UNSAFE) {
@@ -208,7 +206,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
         }
 
 
-        /* send oldest queued terrain event */
+        /* Send the oldest queued terrain event. */
         if (event_queue.count > 0) {
             UB next_events = 0;
 
@@ -227,7 +225,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
                     );
 
                     if (er == E_OK) {
-                        /* remove only after successful send */
+                        /* Remove the event only after a successful send. */
                         s4_event_queue_pop(&event_queue);
                     } else {
                         send_retries++;
@@ -238,8 +236,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
             }
         }
 
-
-        /* receive existing subsystem 3 messages */
+        /* Receive existing Subsystem 3 messages. */
         for (i = 0; i < 4; i++) {
             len = tk_rcv_mbf(
                 mbf_summary,
@@ -260,10 +257,10 @@ EXPORT void monitor_task(INT stacd, void *exinf)
 
         cycles++;
 
-        /* print diagnostics once per 50 cycles */
+        /* Print diagnostics once every 50 cycles. */
         if (cycles % S4_REPORT_INTERVAL == 0) {
 
-            /* show sensor readings */
+            /* Show the sensor readings. */
             if (sample_valid) {
                 tm_printf(
                     (UB*)"[IMU] X=%d Y=%d Z=%d mg "
@@ -274,11 +271,11 @@ EXPORT void monitor_task(INT stacd, void *exinf)
                     (INT)state.pitch_cdeg,
                     (INT)state.roll_cdeg
                 );
-                    /* show estimated wheel height difference */
-                    tm_printf(
-                        (UB*)"[IMU] wheel_height_diff_mm=%d\n",
-                        (INT)state.wheel_height_diff_mm
-                    );
+                /* Show the estimated wheel-height difference. */
+                tm_printf(
+                    (UB*)"[IMU] wheel_height_diff_mm=%d\n",
+                    (INT)state.wheel_height_diff_mm
+                );
 
             } else {
                 tm_printf(
@@ -289,7 +286,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
                 );
             }
 
-            /* show terrain status */
+            /* Show the terrain status. */
             tm_printf(
                 (UB*)"[IMU] terrain=%u unsafe=%u "
                      "unreliable=%u events=0x%02X\n",
@@ -299,7 +296,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
                 pending_events
             );
 
-            /* show sensor timing */
+            /* Show sensor timing information. */
             tm_printf(
                 (UB*)"[IMU] errors=%u invalid=%u "
                      "overruns=%u max_read_us=%u "
@@ -311,18 +308,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
                 slow_reads
             );
 
-            // /* show i2c timing */
-            // tm_printf(
-            //     (UB*)"[IMU] send_wait_us=%u "
-            //         "recv_wait_us=%u wake_max_us=%u "
-            //         "setflag_us=%u\n",
-            //     s4_i2c_send_max_us,
-            //     s4_i2c_recv_max_us,
-            //     s4_i2c_wake_max_us,
-            //     s4_i2c_setflag_max_us
-            // );
-
-            /* show packet status */
+            /* Show packet status. */
             tm_printf(
                 (UB*)"[IMU] send_retries=%u "
                     "packet_errors=%u queued=%u "
@@ -333,17 +319,12 @@ EXPORT void monitor_task(INT stacd, void *exinf)
                 event_queue.overflows
             );
 
-            /* reset reporting measurements */
+            /* Reset the reporting measurements. */
             max_read_us = 0;
             slow_reads = 0;
-            // s4_i2c_send_max_us = 0;
-            // s4_i2c_recv_max_us = 0;
-            // s4_i2c_wake_max_us = 0;
-            // s4_i2c_setflag_max_us = 0;
-            // pending_events = 0;
         }
 
-        /* maintain 20 ms target period */
+        /* Maintain the 20 ms target period. */
         tk_get_tim(&end_time);
 
         elapsed = end_time.lo - start_time.lo;
@@ -358,3 +339,5 @@ EXPORT void monitor_task(INT stacd, void *exinf)
         }
     }
 }
+
+/*** end of file ***/

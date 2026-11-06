@@ -15,13 +15,15 @@ typedef struct {
     H z_mg;
 } IMU_ACCEL_SAMPLE;
 
-/* Initialise the accelerometer over I2C1. */
+/* Initialize the accelerometer over I2C1. */
 IMPORT ER imu_driver_init(void);
 
-/* Read the latest X, Y and Z acceleration values. */
+/* Read the latest X, Y, and Z acceleration values. */
 IMPORT ER imu_driver_read_accel(IMU_ACCEL_SAMPLE *sample);
 
-/* Close the I2C device when no longer needed. */
+/* Close the I2C device when it is no longer needed. */
 IMPORT void imu_driver_close(void);
 
 #endif /* IMU_DRIVER_H */
+
+/*** end of file ***/

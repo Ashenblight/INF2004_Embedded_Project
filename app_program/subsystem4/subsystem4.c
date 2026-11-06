@@ -13,7 +13,7 @@ EXPORT ER subsystem4_init(void)
     T_CMBF cmbf = {0};
     ER er;
 
-    /* existing event flag */
+    /* Create the event flag used by the existing subsystem interface. */
     cflg.flgatr = TA_TFIFO | TA_WMUL;
     cflg.iflgptn = 0;
 
@@ -23,7 +23,7 @@ EXPORT ER subsystem4_init(void)
         return flg_events;
     }
 
-    /* existing message buffer */
+    /* Create the message buffer used by the existing subsystem interface. */
     cmbf.mbfatr = TA_TFIFO;
     cmbf.bufsz = 4 * S4_SUMMARY_MAX;
     cmbf.maxmsz = S4_SUMMARY_MAX;
@@ -36,7 +36,7 @@ EXPORT ER subsystem4_init(void)
         return er;
     }
 
-    /* packed terrain event buffer */
+    /* Create the packed terrain event buffer. */
     cmbf.bufsz = S4_EVENT_BUFFER_BYTES;
     cmbf.maxmsz = S4_PACKET_EVENT_SIZE;
 
@@ -49,7 +49,7 @@ EXPORT ER subsystem4_init(void)
         return er;
     }
 
-    /* fault event flag */
+    /* Create the fault event flag. */
     flg_s4_faults = tk_cre_flg(&cflg);
 
     if (flg_s4_faults < E_OK) {
@@ -76,3 +76,5 @@ EXPORT ER subsystem4_start(void)
 
     return (tid < E_OK) ? (ER)tid : E_OK;
 }
+
+/*** end of file ***/

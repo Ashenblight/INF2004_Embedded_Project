@@ -3,7 +3,7 @@
 
 #include "terrain_detection.h"
 
-/* proposed packet format */
+/* Proposed packet format. */
 #define S4_PACKET_VERSION       1
 #define S4_PACKET_NAV_EVENT     2
 #define S4_PACKET_EVENT_SIZE    2
@@ -21,3 +21,5 @@ IMPORT ER terrain_packet_decode(
 );
 
 #endif
+
+/*** end of file ***/

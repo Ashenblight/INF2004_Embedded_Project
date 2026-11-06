@@ -9,7 +9,7 @@
 
 #define S4_EVENT_BUFFER_BYTES 128
 
-/* fault flags */
+/* Fault flags. */
 #define S4_FAULT_SENSOR          0x0001
 #define S4_FAULT_UNSAFE_TILT     0x0002
 #define S4_FAULT_EVENT_OVERFLOW  0x0004
@@ -25,3 +25,5 @@ IMPORT UW s4_lines_received;
 IMPORT void monitor_task(INT stacd, void *exinf);
 
 #endif /* SUBSYSTEM4_H */
+
+/*** end of file ***/

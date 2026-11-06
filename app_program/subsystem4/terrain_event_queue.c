@@ -1,6 +1,6 @@
 #include "terrain_event_queue.h"
 
-/* reset the event queue */
+/* Reset the event queue. */
 EXPORT void s4_event_queue_reset(S4_EVENT_QUEUE *queue)
 {
     if (queue == NULL) {
@@ -13,7 +13,7 @@ EXPORT void s4_event_queue_reset(S4_EVENT_QUEUE *queue)
     queue->overflows = 0;
 }
 
-/* add an event to the queue */
+/* Add an event to the queue. */
 EXPORT BOOL s4_event_queue_push(
     S4_EVENT_QUEUE *queue,
     UB events
@@ -36,7 +36,7 @@ EXPORT BOOL s4_event_queue_push(
     return TRUE;
 }
 
-/* read the oldest event */
+/* Read the oldest event. */
 EXPORT BOOL s4_event_queue_peek(
     const S4_EVENT_QUEUE *queue,
     UB *events
@@ -51,7 +51,7 @@ EXPORT BOOL s4_event_queue_peek(
     return TRUE;
 }
 
-/* remove the oldest event */
+/* Remove the oldest event. */
 EXPORT void s4_event_queue_pop(S4_EVENT_QUEUE *queue)
 {
     if (queue == NULL || queue->count == 0) {
@@ -62,3 +62,5 @@ EXPORT void s4_event_queue_pop(S4_EVENT_QUEUE *queue)
         (queue->head + 1) % S4_EVENT_QUEUE_SIZE;
     queue->count--;
 }
+
+/*** end of file ***/

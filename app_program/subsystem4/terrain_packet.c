@@ -13,13 +13,13 @@ EXPORT ER terrain_packet_encode(
         return E_PAR;
     }
 
-    /* version and message type */
+    /* Set the version and message type. */
     packet[0] = (UB)(
         (S4_PACKET_VERSION << 4) |
         S4_PACKET_NAV_EVENT
     );
 
-    /* terrain event flags */
+    /* Store the terrain event flags. */
     packet[1] = (UB)events;
 
     return E_OK;
@@ -58,3 +58,5 @@ EXPORT ER terrain_packet_decode(
 
     return E_OK;
 }
+
+/*** end of file ***/

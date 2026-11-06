@@ -1,9 +1,9 @@
 /*
- * fixed-point imu processing for the pico w.
- * calculates pitch and roll without floating point.
+ * Fixed-point IMU processing for the Pico W.
+ * Calculate pitch and roll without floating-point operations.
  *
- * sensor y axis points forward along the car.
- * sensor is approximately level on flat ground.
+ * The sensor Y-axis points forward along the car.
+ * The sensor is approximately level on flat ground.
  */
 
 #include "imu_processing.h"
@@ -14,7 +14,7 @@
 #define IMU_WHEEL_SPACING_MM 115
 #define IMU_FLAT_X_MG       (-20)
 
-/* sine values for angles from 0 to 90 degrees */
+/* Sine values for angles from 0 to 90 degrees. */
 LOCAL const UH sine_table[] = {
        0,  87, 174, 259, 342,
      423, 500, 574, 643, 707,
@@ -22,7 +22,7 @@ LOCAL const UH sine_table[] = {
      966, 985, 996, 1000
 };
 
-/* integer square root */
+/* Calculate the integer square root. */
 LOCAL UW imu_isqrt(UW value)
 {
     UW result = 0;
@@ -47,8 +47,8 @@ LOCAL UW imu_isqrt(UW value)
 }
 
 /*
- * estimate tilt from one acceleration axis.
- * result is in centidegrees: 100 = 1 degree.
+ * Estimate tilt from one acceleration axis.
+ * The result is in centidegrees: 100 equals 1 degree.
  */
 LOCAL H imu_estimate_tilt(W axis_mg, UW gravity_mg)
 {
@@ -91,7 +91,7 @@ LOCAL H imu_estimate_tilt(W axis_mg, UW gravity_mg)
     return (H)((axis_mg < 0) ? angle : -angle);
 }
 
-/* reset imu processing values */
+/* Reset IMU processing values. */
 EXPORT void imu_processing_reset(IMU_PROCESSING_STATE *state)
 {
     if (state == NULL) {
@@ -112,7 +112,7 @@ EXPORT void imu_processing_reset(IMU_PROCESSING_STATE *state)
     state->initialized = 0;
 }
 
-/* filter acceleration and calculate pitch and roll */
+/* Filter acceleration and calculate pitch and roll. */
 EXPORT ER imu_processing_update(
     IMU_PROCESSING_STATE *state,
     const IMU_ACCEL_SAMPLE *sample)
@@ -132,7 +132,7 @@ EXPORT ER imu_processing_update(
         state->z_filtered_mg = sample->z_mg;
         state->initialized = 1;
     } else {
-        /* reduce noise using a low-pass filter */
+        /* Reduce noise using a low-pass filter. */
         state->x_filtered_mg =
             (3 * state->x_filtered_mg + sample->x_mg) / 4;
 
@@ -165,19 +165,19 @@ EXPORT ER imu_processing_update(
 
     state->gravity_mg = (H)magnitude;
 
-    /* y axis measures forward/backward tilt */
+    /* The Y-axis measures forward/backward tilt. */
     state->pitch_cdeg = imu_estimate_tilt(
         state->y_filtered_mg,
         magnitude
     );
 
-    /* x axis measures sideways tilt */
+    /* The X-axis measures sideways tilt. */
     state->roll_cdeg = imu_estimate_tilt(
         state->x_filtered_mg,
         magnitude
     );
 
-    /* estimate height difference between wheels */
+    /* Estimate the height difference between the wheels. */
     {
         W delta_x = state->x_filtered_mg - IMU_FLAT_X_MG;
 
@@ -196,8 +196,8 @@ EXPORT ER imu_processing_update(
 }
 
 /*
- * estimate height change using wheel travel.
- * this still requires distance from another subsystem.
+ * Estimate the height change using wheel travel.
+ * This operation still requires distance from another subsystem.
  */
 EXPORT ER imu_processing_add_travel(
     IMU_PROCESSING_STATE *state,
@@ -230,3 +230,5 @@ EXPORT ER imu_processing_add_travel(
 
     return E_OK;
 }
+
+/*** end of file ***/
