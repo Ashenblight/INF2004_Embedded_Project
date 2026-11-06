@@ -17,7 +17,7 @@
 #define BARCODE_MAX_STEP_TICKS 4096U
 #define BARCODE_INPUT_BUFFER_BYTES 1024
 #define BARCODE_RESULT_BUFFER_BYTES 256
-#define BARCODE_MAPPING_TOPIC "se05/barcode/mapping"
+#define BARCODE_MAPPING_TOPIC "mtk3smp-pico/cmd/test"
 #if ((BARCODE_GPIO_PIN > 28U) || ((BARCODE_GPIO_PIN > 22U) && (BARCODE_GPIO_PIN < 26U)))
 #error "Use an application GPIO 0..22 or 26..28"
 #endif

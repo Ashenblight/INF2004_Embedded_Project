@@ -100,7 +100,7 @@ ER result = line_task_set_following_enabled(true);
 
 Before a stop or a manoeuvre that takes control away from routine line following, Vehicle Controller calls the same function with `false` and coordinates Motion Control's mode/stop command. This setter alone does not physically stop the motors.
 
-Enabling invalidates the old sample. The getter can therefore fail until a NEW sample arrives. The line task currently samples every 10 ms; samples older than 30 ms are rejected. These limits are defined in `line_config.h`, not values Motion needs to duplicate.
+Enabling invalidates the old sample. The getter can therefore fail until a NEW sample arrives. The line task currently samples every 10 ms; samples older than 30 ms are rejected. These limits are defined in `line_task.h`, not values Motion needs to duplicate.
 
 **5. Handle the return value**
 
@@ -122,4 +122,4 @@ For a non-NULL output pointer, the getter returns `direction = LINE_STEER_CROSS_
 
 Motion needs only `line_task_get_steering()` for routine line-steering data. Existing `subsystem3_init()` / `subsystem3_start()` already initialise and start the line tasks; do not initialise them again from Motion Control. No new task or direct raw-sensor access is required for ordinary steering. VC must separately bind the junction destination with `line_task_bind_controller()` before S3 starts. Line Task sends one CROSS_JUNCTION event at the first enabled two-black sample and holds routine steering until VC changes permission. The old UNCERTAIN enum has been removed.
 
-Guide checked against the current project's `line_task.h`, `line_task.c`, `line_following.h` and `line_config.h` on 30 October 2026. This document does not modify firmware.
+Guide checked against the current project's `line_task.h` and `line_task.c` on 30 October 2026. This document does not modify firmware.

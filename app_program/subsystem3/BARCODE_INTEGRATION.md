@@ -1,5 +1,63 @@
 # Subsystem 3 barcode integration — 30 October 2026
 
+## Current startup and file layout
+
+Temporary barcode bench mode is enabled by `S5_BARCODE_BENCH_TEST=1` in
+`subsystem5/vehicle_controller.c`. GP20 starts line following and capture without
+an MQTT message, using A→LEFT, F→RIGHT, Z→STRAIGHT (no U-turn). Start still needs
+a fresh valid line reading outside a junction. GP20 also stops manually.
+
+At CROSS_JUNCTION the car stops, prints the scored GUESS and mapped
+movement, and stays stopped for every result, including UNKNOWN. The S2 turn
+and straight-crossing calls are deferred; normal S2 driving/stopping remains.
+The bench map uses reserved revision 65535 so an MQTT update cannot replace it
+while the car is stopped waiting for its barcode result.
+
+Set `S5_BARCODE_BENCH_TEST` to `0`, rebuild and reboot to restore the mission
+workflow below. MQTT receive code is retained: mission startup requires the
+day's map before GP20 Start, then executes the mapped movement at a junction;
+UNKNOWN crosses straight and resumes line following. The matcher uses the
+configured letters. Scores are fit measures rather than calibrated probabilities.
+
+| Files | Responsibility |
+|---|---|
+| `line_task.c/.h` | Line GPIO inputs, configuration, classification, periodic sampling, shared status and junction detection |
+| `barcode_port.c/.h`, `barcode_config.h` | Barcode GPIO/timer, encoder access and hardware settings |
+| `barcode_capture.c/.h` | Capture ring and raw trace |
+| `barcode_decoder.c/.h` | Strict Code 39 decoder and scored template matcher |
+| `barcode_shared.c/.h` | Received movement map, permission and fault state |
+| `barcode_task.c/.h` | Worker, ordered prints and junction result delivery |
+| `navigation_message.c/.h` | Movement types and binary barcode/junction event formats |
+| `subsystem3.c/.h` | Startup and retained mailbox/statistics consumer |
+| `subsystem3_test.c` | On-target tests and reusable golden patterns |
+
+Line configuration and the existing `line_following_*()` functions now live in
+`line_task.h/.c`. Golden barcode vectors live inside the `APP_TEST` section of
+`subsystem3_test.c`; normal firmware still uses real sensors. This consolidation
+reduces the directory from 26 files to 22 without changing the public functions.
+
+## MQTT format found in Buddy 1's branch
+
+Inspected local `origin/buddy1-wifi-mqtt` at `501ca4f`.
+Its topic is `mtk3smp-pico/cmd/test`. A complete map packet has
+`[0x17][revision8][packed entries]`. Each entry is `(letter << 3) | movement`,
+where A=0 through Z=25 and movements are LEFT=1, RIGHT=2, FORWARD=3, UTURN=4.
+The branch's codec emits four entries, giving six bytes. This receiver also
+accepts three entries in five bytes for the current no-U-turn mission. That
+three-entry extension requires the PC sender to emit five bytes, as the branch's
+existing encoder still emits six.
+
+The existing network-owner task subscribes to the mapping topic, reassembles
+binary fragments, and invokes `barcode_mapping_apply_mqtt()`. Subsystem 3
+registers this handler during init. An early map is retained until registration; a busy mapping mutex is retried on the network-owner heartbeat. Incomplete/oversized packets, duplicate
+letters, invalid actions and stale/conflicting revisions are rejected. Internally,
+wire revisions 0..255 become 1..256 to preserve nonzero navigation revisions.
+Four-entry messages follow Buddy 1's validation, including allowing two letters
+to share an action. The older eight-byte `barcode_mapping_apply_wire()` proposal
+remains available for existing callers and retains its stricter contract.
+
+
+
 Target: `C:\Users\aloys\Downloads\SIT\y2s1\INF2004 embedded\carProj\INF2004_ProjectTemplate\app_program\subsystem3`.
 
 S3 code is implemented. For the short five-connection checklist, see [BARCODE_CONNECTIONS.md](BARCODE_CONNECTIONS.md). Production `barcode_port.c` contains no host-simulation branch and needs no uncommenting. This is not an end-to-end tested car: linking Buddy 2 Motion Control, the MQTT receiver call, Vehicle Controller event binding and junction/motor behaviour still require team integration. Normal firmware starts barcode scanning **disabled**. A missing encoder implementation returns `E_NOEXS`; it never substitutes simulated counts. Line following now reports two-black as CROSS_JUNCTION and emits a separate navigation event; see CROSS_JUNCTION_GUIDE.md.
@@ -10,16 +68,16 @@ S3 code is implemented. For the short five-connection checklist, see [BARCODE_CO
 
 **Barcode:** GP4 level + current wheel position → timer handler in `barcode_capture.c` pairs them → short ring buffer → `barcode_worker()` → `barcode_decoder_feed()` recognises A–Z → `barcode_mapping_resolve()` looks up the runtime mapping under its mutex → `barcode_message_encode()` → controller-owned navigation message buffer → Vehicle Controller keeps one pending instruction → later cross-junction event → Vehicle Controller authorises one manoeuvre to Motion Control.
 
-**Mapping:** PC MQTT publish → team's network-owner MQTT receive path reassembles the complete payload → calls `barcode_mapping_apply_wire(payload, length)` in task context → S3 replaces the four-entry map atomically. Barcode does not call raw MQTT/lwIP from its own task or interrupt.
+**Mapping:** PC MQTT publish → network-owner task reassembles the complete payload → calls `barcode_mapping_apply_mqtt(payload, length)` → S3 replaces the received map atomically. Barcode does not call raw MQTT/lwIP from its own task or interrupt.
 
-The 500 microsecond timer only schedules observations. Stripe widths are differences in **encoder ticks**, never elapsed time multiplied by an assumed speed. A short IRQ gathers observations; decoding, mutex access and navigation messages run in the worker task.
+The 500 microsecond timer only schedules observations. The strict decoder measures widths in **encoder ticks**. The junction fallback matcher uses captured microsecond widths directly and compares relative narrow/wide groups. A short IRQ gathers observations; decoding, mutex access and navigation messages run in the worker task.
 
 ## Assumptions to confirm/change with the team
 
 | Item | Implemented assumption / exact interface | What you must connect or change |
 |---|---|---|
 | Existing line steering | Motion calls `line_task_get_steering(line_steering_t *)`; VC calls `line_task_set_following_enabled(bool)` | Existing S3 startup already creates/starts the line tasks. In Motion's loop, handle errors and enforce mode; no new line buffer or direct barcode read is required. |
-| Encoder getter name | `barcode_port_read_encoder()` calls Buddy 2’s `motion_get_odometry(int32_t *, int32_t *)` in `barcode_encoder.c` | Link Buddy 2 Motion Control. The adapter returns `E_NOEXS` if the getter is absent. |
+| Encoder getter name | `barcode_port_read_encoder()` calls Buddy 2’s `motion_get_odometry(int32_t *, int32_t *)` in `barcode_port.c` | Link Buddy 2 Motion Control. The adapter returns `E_NOEXS` if the getter is absent. |
 | Encoder getter behaviour | Current, coherent, nonblocking, ISR-safe snapshot; **no mutex, sleeping, UART logging or cached 10 ms motor-loop value** | Agree an ISR-safe raw-counter snapshot. If counters update on the other core, use a coherent bounded snapshot mechanism; `volatile` alone is insufficient for several fields. A spinning seqlock can deadlock if its writer was interrupted on this core. |
 | Encoder snapshot fields | `position_ticks`: average of the two signed live wheel counts; `reset_epoch`: zero; `sampled_at_us`: RP2040 `TIMERAWL` time at the start of the read | Confirm both counts change in the same direction when moving forward. Keep odometry running without resets during scans. |
 | Wheel/print calibration | Bounds in `barcode_config.h`: element 1–1024 ticks; maximum observation step 4096 ticks | Measure ticks per revolution, wheel circumference, minimum/maximum stripe widths and true maximum speed. Narrow stripes must cover enough ticks and observations to distinguish widths. The 1-tick lower limit is a software bound, not an accuracy claim. |
@@ -27,8 +85,8 @@ The 500 microsecond timer only schedules observations. Stripe widths are differe
 | Hardware timer ownership | RP2040 hardware alarm 2 / IRQ 2, core 0, priority 3 (matching this template's scheduler); no shared GPIO IRQ handler is installed | Reserve alarm 2 with the team. If used elsewhere, choose a free hardware alarm in config; do not overwrite another subsystem's handler. This is separate from RTOS alarm-handler objects. |
 | Capture limits | 500 µs sample period; max 2 ms gap, 1 ms encoder age; 64-slot ring (63 usable); worker rejects queued observations older than 50 ms | Validate at the real speed, narrowest stripe and worst interrupt/task load. Change limits only with measured evidence; an old/dropped observation inhibits the scan. |
 | Recovery limits | Incomplete-frame no-motion timeout 1 s; total frame timeout 5 s | Confirm expected stopping/scan behaviour. Invalid scans, lost samples and transport failures latch a fault and disable scanning. VC decides stop/recovery, clears the fault while disabled, then enables a new run. |
-| Runtime mapping | Four distinct A–Z letters, each of LEFT/RIGHT/FORWARD/UTURN exactly once; no production default map | Jenny calls `barcode_mapping_apply_wire()` after complete MQTT message reassembly. Other letters decode normally but report UNMAPPED / NONE; never default to FORWARD. |
-| MQTT topic / payload | Suggested topic macro `BARCODE_MAPPING_TOPIC` = `se05/barcode/mapping`; proposed 8-byte packet below | Agree topic, subscription, authentication and complete-message delivery with Jenny. The macro is a proposed contract, not a subscription automatically added to the networking library. Return an acceptance/error acknowledgement to PC. |
+| Runtime mapping | Three or four received A–Z letters and their actions; no production default map | Jenny calls `barcode_mapping_apply_wire()` after complete MQTT message reassembly. Strict decoder events report UNMAPPED / NONE for other letters. The junction fallback classifies them as UNKNOWN and crosses straight. |
+| MQTT topic / payload | `BARCODE_MAPPING_TOPIC` = `mtk3smp-pico/cmd/test`; Buddy 1 packet documented above | Agree topic, subscription, authentication and complete-message delivery with Jenny. The current networking library subscribes and routes complete map messages. Return an acceptance/error acknowledgement to PC. |
 | Map updates / revisions | Replace whole map only while scanning disabled. Revision 1–65535 increases; identical same-revision retry is accepted; changed/replayed revision rejected | Stop/configure before demo, acknowledge accepted map, then enable. Retry `E_TMOUT` from the short try-lock; reject `E_PAR`/`E_OBJ`. Reboot for revision exhaustion; revise protocol if persistent across reboot is needed. |
 | Navigation output | Proposed **version 2**, 16-byte character/action event; 4-byte fault event; exact fields below | Agree with VC. `barcode_task_bind_controller(event_mbf, controller_flag, event_bit, fault_bit)` **after S3 init and before S3 start**. Caller provides actual IDs/bits; buffer max message size must be at least 16 bytes and large enough for every producer's event. |
 | Buffer/flag ownership | VC owns global MBF_NAV_EVENTS and controller flag; S3 owns fallback result buffer for isolated tests | VC is the sole global-buffer receiver/dispatcher; drain all events when notified. Handle barcode fault bit before moves. Check persistent `barcode_task_control_status()` too: a full queue can lose a fault record. Do not use `barcode_task_receive_result()` after binding; it deliberately returns `E_OBJ`. |
@@ -43,7 +101,7 @@ The 500 microsecond timer only schedules observations. Stripe widths are differe
 
 Buddy 2 provides `void motion_get_odometry(int32_t *left_ticks, int32_t *right_ticks)`. The barcode adapter calls it from the core-0 capture interrupt, where the encoder driver also updates its counts. The task-context enable check uses only the return code and timestamp.
 
-## Mapping packet proposed for Jenny
+## Legacy eight-byte mapping proposal
 
 All multibyte numbers are big-endian. Each entry is `(movement << 5) | letter`, where A=0 … Z=25 and movement is NONE=0, LEFT=1, RIGHT=2, FORWARD=3, UTURN=4. Codes 5–7 are not valid mapping movements. Four unique letters and all four movements are required.
 
@@ -106,14 +164,14 @@ S3 generates the junction event; it does not directly start motors, issue a hard
 
 | File | Main functions and purpose |
 |---|---|
-| `barcode_encoder.c` | `barcode_port_read_encoder()` reads and averages Buddy 2’s live counts using `motion_get_odometry()`. |
+| `barcode_port.c` | `barcode_port_read_encoder()` reads and averages Buddy 2’s live counts using `motion_get_odometry()`. |
 | `barcode_port.c` | Always-compiled production GPIO/timer/critical-section functions. Computer tests link `testing/subsystem3/host_barcode_port.c` instead. `barcode_port_is_ready()` prevents enabling before capture starts. |
 | `barcode_capture.c` | `timer_handler()` pairs current encoder/level; `barcode_capture_start/stop()` own capture; `barcode_capture_pop()` transfers an observation to the worker; `take_faults/last_motion_us` support loss/timeout checks. |
 | `barcode_decoder.c` | `barcode_decoder_init/reset()` set bounds/reset a stream; `barcode_decoder_feed()` measures runs in ticks, checks quiet/start/data/stop patterns, handles reverse labels and outputs one letter; `in_progress()` supports timeouts. |
 | `barcode_shared.c` | `barcode_mapping_apply[_wire]()` validates/commits MQTT map; `copy()` provides a protected snapshot; `resolve()` gets action+revision for the same run. `barcode_shared_*` protect permission/faults and publish only the ISR-readable generation. |
-| `barcode_message.c` | `barcode_message_encode/decode()` explicitly pack and validate the proposed binary event. |
+| `navigation_message.c` | `barcode_message_encode/decode()` explicitly pack and validate the proposed binary event. |
 | `barcode_task.c` | `init/start()` own RTOS resources; `barcode_worker()` consumes observations; `process()` decodes/resolves/sends; `notify_fault()` cancels and reports. Public binding/permission/current-result/status APIs are the integration seam. |
-| `barcode_selftest.c` / `barcode_test_vectors.h` | TEST=1-only synthetic encoder-distance fixtures, all52 letter/orientation cases and checks. No production default mapping and no real encoder signal are supplied here. |
+| `subsystem3_test.c` | TEST=1-only synthetic encoder-distance fixtures, all52 letter/orientation cases and checks. No production default mapping and no real encoder signal are supplied here. |
 | `subsystem3.c/.h`, `subsystem3_test.c` | Add barcode init/start and TEST=1 selftest to existing S3 startup. The line_* files now implement CROSS_JUNCTION and its controller event. left_ir.* and centre_ir.* remain unchanged. |
 
 ## Testing / evidence

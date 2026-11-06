@@ -20,6 +20,8 @@
 #include "lwip/timeouts.h"
 #include "wifi_secrets.h"
 #include "mqtt_utk.h"
+#include "../../../../app_program/subsystem3/barcode_config.h"
+#include <string.h>
 #include <tm/tmonitor.h>
 
 #define MQTT_UTK_HEARTBEAT_MS   5000
@@ -42,6 +44,31 @@ static char		rx_topic[MQTT_UTK_RX_TOPIC_MAX];
 static UB		rx_data[MQTT_UTK_RX_DATA_MAX];
 static u16_t		rx_len;
 static u8_t		rx_truncated;
+static u32_t rx_expected_len;
+static mqtt_mapping_handler_t mapping_handler;
+/* Network-owner task only. Retain an early map until S3 registers its handler. */
+static unsigned char pending_mapping[6];
+static unsigned pending_mapping_length;
+static u8_t mapping_pending;
+
+void mqtt_utk_set_mapping_handler(mqtt_mapping_handler_t handler)
+{
+    __atomic_store_n(&mapping_handler, handler, __ATOMIC_RELEASE);
+}
+
+static void deliver_pending_mapping(void)
+{
+    mqtt_mapping_handler_t handler =
+        __atomic_load_n(&mapping_handler, __ATOMIC_ACQUIRE);
+    if (!mapping_pending || handler == NULL)
+        return;
+    const int result = handler(pending_mapping, pending_mapping_length);
+    if (result == 1)
+        return;
+    mapping_pending = 0;
+    tm_printf((UB *)"mqtt: mapping %s (result=%d)\n",
+              result == 0 ? "applied" : "rejected", result);
+}
 
 static void heartbeat_timeout(void *arg);
 
@@ -52,7 +79,6 @@ static void incoming_publish_cb(void *arg, const char *topic, u32_t tot_len)
 	u32_t	i;
 
 	(void)arg;
-	(void)tot_len;
 
 	for(i = 0; i < (MQTT_UTK_RX_TOPIC_MAX - 1) && topic[i] != '\0'; i++) {
 		rx_topic[i] = topic[i];
@@ -60,7 +86,8 @@ static void incoming_publish_cb(void *arg, const char *topic, u32_t tot_len)
 	rx_topic[i] = '\0';
 
 	rx_len = 0;
-	rx_truncated = 0;
+	rx_expected_len = tot_len;
+	rx_truncated = tot_len >= MQTT_UTK_RX_DATA_MAX;
 }
 
 static void incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags)
@@ -71,16 +98,32 @@ static void incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags)
 
 	for(i = 0; i < len; i++) {
 		if(rx_len < (MQTT_UTK_RX_DATA_MAX - 1)) {
-			/* The console is a terminal -- keep raw bytes from a
-			 * payload this demo did not publish from scrambling it. */
-			UB c = data[i];
-			rx_data[rx_len++] = (c >= 0x20 && c < 0x7f)? c: '.';
+			/* Preserve binary bytes for mapping validation. Other payloads
+			 * are sanitized only when displayed below. */
+			rx_data[rx_len++] = data[i];
 		} else {
 			rx_truncated = 1;
 		}
 	}
 
 	if((flags & MQTT_DATA_FLAG_LAST) != 0) {
+        if (strcmp(rx_topic, BARCODE_MAPPING_TOPIC) == 0) {
+            if (rx_truncated || rx_len != rx_expected_len ||
+                (rx_len != 5U && rx_len != 6U) || rx_data[0] != 0x17U) {
+                tm_printf((UB *)"mqtt: mapping dropped (invalid format or incomplete)\n");
+            } else {
+                memcpy(pending_mapping, rx_data, rx_len);
+                pending_mapping_length = rx_len;
+                mapping_pending = 1;
+                deliver_pending_mapping();
+            }
+            return;
+        }
+        for (i = 0; i < rx_len; ++i) {
+            if (rx_data[i] < 0x20 || rx_data[i] >= 0x7f) {
+                rx_data[i] = '.';
+            }
+        }
 		rx_data[rx_len] = '\0';
 		tm_printf((UB*)"mqtt: RX [%s] \"%s\"%s\n", rx_topic, rx_data,
 			  rx_truncated? " (truncated)": "");
@@ -95,6 +138,13 @@ static void subscribe_done_cb(void *arg, err_t result)
 	} else {
 		tm_printf((UB*)"mqtt: subscribe failed, err=%d\n", (int)result);
 	}
+}
+
+static void mapping_subscribe_done_cb(void *arg, err_t result)
+{
+    (void)arg;
+    tm_printf((UB *)"mqtt: mapping subscription %s [%s]\n",
+              result == ERR_OK ? "ready" : "failed", BARCODE_MAPPING_TOPIC);
 }
 
 static void publish_done_cb(void *arg, err_t result)
@@ -112,6 +162,7 @@ static void heartbeat_timeout(void *arg)
 	int			len;
 
 	(void)arg;
+    deliver_pending_mapping();
 
 	if(mqtt_client_is_connected(client)) {
 		len = tm_sprintf(payload, (const UB*)"hb %u", count++);
@@ -165,6 +216,9 @@ static void connection_cb(mqtt_client_t *c, void *arg, mqtt_connection_status_t 
 			tm_printf((UB*)"mqtt: mqtt_subscribe() failed, err=%d\n",
 				  (int)err);
 		}
+        err = mqtt_subscribe(client, BARCODE_MAPPING_TOPIC, 1, mapping_subscribe_done_cb, NULL);
+        if (err != ERR_OK)
+            tm_printf((UB *)"mqtt: mapping subscribe failed, err=%d\n", (int)err);
 
 		/* Drop any chain left over from a previous connection before
 		 * arming a new one. Each reconnect would otherwise add another

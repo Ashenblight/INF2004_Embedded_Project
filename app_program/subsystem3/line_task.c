@@ -1,8 +1,132 @@
 /** @file line_task.c
- *  @brief Periodic line sampling and separate, slower USB status logging.
+ *  @brief Line GPIO input, classification, periodic sampling and steering publication.
  */
 #include "subsystem3.h"
-#include "line_config.h"
+
+/* Line GPIO input and classification. */
+#if ((LINE_LEFT_GPIO_PIN <= 1U) || (LINE_CENTRE_GPIO_PIN <= 1U)) && (BOARD_UART0_FREE == 0)
+#error "Line sensors on GP0/GP1 require CONSOLE=usb_cdc CRASH_REPORT=0."
+#endif
+
+/**
+ * @brief Initialise both IR sensors.
+ */
+void line_following_init(void)
+{
+    (void)gpio_set_pin(LINE_LEFT_GPIO_PIN, GPIO_MODE_IN);
+    (void)gpio_set_pin(LINE_CENTRE_GPIO_PIN, GPIO_MODE_IN);
+}
+
+/**
+ * @brief Read both IR sensors.
+ */
+line_sensor_readings_t line_following_read(void)
+{
+    const bool left_high = (gpio_get_val(LINE_LEFT_GPIO_PIN) != 0U);
+    const bool centre_high = (gpio_get_val(LINE_CENTRE_GPIO_PIN) != 0U);
+
+    return line_following_pack_readings(left_high, centre_high);
+}
+
+line_sensor_readings_t line_following_pack_readings(bool left_high, bool centre_high)
+{
+    line_sensor_readings_t readings = 0U;
+
+    if (left_high)
+    {
+        readings |= LINE_SENSOR_LEFT_HIGH_MASK;
+    }
+    if (centre_high)
+    {
+        readings |= LINE_SENSOR_CENTRE_HIGH_MASK;
+    }
+    return readings;
+}
+
+/**
+ * @brief Classify the black-line position.
+ */
+line_detection_t line_following_classify(bool left_black, bool centre_black)
+{
+    line_detection_t detection = LINE_DETECTION_NONE;
+
+    if (left_black && centre_black)
+    {
+        detection = LINE_DETECTION_CROSS_JUNCTION;
+    }
+    else if (left_black)
+    {
+        detection = LINE_DETECTION_LEFT_ONLY;
+    }
+    else if (centre_black)
+    {
+        detection = LINE_DETECTION_CENTRE_ONLY;
+    }
+    else
+    {
+        detection = LINE_DETECTION_NONE;
+    }
+
+    return detection;
+}
+
+/**
+ * @brief Convert the line position to a steering request.
+ */
+line_steering_t line_following_decide(line_detection_t detection)
+{
+    line_steering_t steering = LINE_STEER_INVALID;
+
+    switch (detection)
+    {
+    case LINE_DETECTION_NONE:
+        steering = LINE_STEER_STRAIGHT;
+        break;
+
+    case LINE_DETECTION_LEFT_ONLY:
+        steering = LINE_STEER_LEFT;
+        break;
+
+    case LINE_DETECTION_CENTRE_ONLY:
+        steering = LINE_STEER_RIGHT;
+        break;
+
+    case LINE_DETECTION_CROSS_JUNCTION:
+        steering = LINE_STEER_CROSS_JUNCTION;
+        break;
+
+    default:
+        steering = LINE_STEER_INVALID;
+        break;
+    }
+
+    return steering;
+}
+
+/**
+ * @brief Process one line-following update.
+ */
+line_steering_t line_following_update(void)
+{
+    return line_following_evaluate(line_following_read());
+}
+
+line_steering_t line_following_evaluate(line_sensor_readings_t readings)
+{
+    const bool left_high = (readings & LINE_SENSOR_LEFT_HIGH_MASK) != 0U;
+    const bool centre_high = (readings & LINE_SENSOR_CENTRE_HIGH_MASK) != 0U;
+    const bool left_black = (left_high == (LINE_LEFT_BLACK_HIGH != 0U));
+    const bool centre_black = (centre_high == (LINE_CENTRE_BLACK_HIGH != 0U));
+
+    if ((readings & (uint8_t)~LINE_SENSOR_LEVEL_MASK) != 0U)
+    {
+        return LINE_STEER_INVALID;
+    }
+
+    return line_following_decide(line_following_classify(left_black, centre_black));
+}
+
+/* Periodic sampling and published steering. */
 
 /* The standalone sensor-test template does not contain Motion Control. */
 extern void motion_update_steering(int8_t correction) __attribute__((weak));
@@ -467,66 +591,12 @@ static void line_sample_task(INT stacd, void *exinf)
     tk_ext_tsk();
 }
 
-static const char *line_steering_name(line_steering_t steering)
-{
-    const char *name = "INVALID";
-
-    switch (steering)
-    {
-    case LINE_STEER_STRAIGHT:
-        name = "STRAIGHT";
-        break;
-    case LINE_STEER_LEFT:
-        name = "LEFT";
-        break;
-    case LINE_STEER_RIGHT:
-        name = "RIGHT";
-        break;
-    case LINE_STEER_CROSS_JUNCTION:
-        name = "CROSS_JUNCTION";
-        break;
-    case LINE_STEER_INVALID:
-    default:
-        break;
-    }
-    return name;
-}
-
 static void line_log_task(INT stacd, void *exinf)
 {
-    line_task_status_t status;
-
     (void)stacd;
     (void)exinf;
 
     tm_printf((UB *)"[S3 LINE] period=%u ms; provisional polarity L=%u C=%u\n",
               LINE_SAMPLE_PERIOD_MS, LINE_LEFT_BLACK_HIGH, LINE_CENTRE_BLACK_HIGH);
-    while (true)
-    {
-        if (tk_dly_tsk(LINE_LOG_PERIOD_MS) < E_OK)
-        {
-            break;
-        }
-        if ((line_task_get_latest(&status) == E_OK) &&
-            ((status.packed & LINE_STATUS_VALID_MASK) != 0U))
-        {
-            /* Print after releasing the mutex; sampling never prints. */
-            tm_printf((UB *)"[S3 LINE] L=%u C=%u request=%s enabled=%u n=%u t=%u "
-                            "gap=%u max=%u skipped=%u busy=%u junction_hold=%u event_fault=%u\n",
-                      (UINT)((status.packed & LINE_SENSOR_LEFT_HIGH_MASK) != 0U),
-                      (UINT)((status.packed & LINE_SENSOR_CENTRE_HIGH_MASK) != 0U),
-                      line_steering_name(line_status_direction(status.packed)),
-                      (UINT)((status.packed & LINE_STATUS_ENABLED_MASK) != 0U),
-                      (UINT)status.sample_count, (UINT)status.sample_time_ms,
-                      (UINT)status.last_interval_ms, (UINT)status.max_interval_ms,
-                      (UINT)status.skipped_wakeups, (UINT)status.publish_busy_count,
-                      (UINT)((status.packed & LINE_STATUS_JUNCTION_HOLD_MASK) != 0U),
-                      (UINT)((status.packed & LINE_STATUS_EVENT_FAULT_MASK) != 0U));
-        }
-        else
-        {
-            tm_printf((UB *)"[S3 LINE] no fresh sample available\n");
-        }
-    }
     tk_ext_tsk();
 }
