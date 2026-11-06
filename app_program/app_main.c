@@ -72,6 +72,7 @@ EXPORT INT usermain(void)
 	/* Phase 1: Run 52 static register/logic unit tests BEFORE task execution */
 	tm_printf((UB *)"[TEST] === test run start ===\n");
 	subsystem2_test();
+	tk_dly_tsk(1000);
 	tm_printf((UB *)"[TEST] === test run end ===\n\n");
 #endif
 
