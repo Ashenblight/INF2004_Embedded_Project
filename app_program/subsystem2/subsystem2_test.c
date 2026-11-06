@@ -693,5 +693,4 @@ EXPORT void subsystem2_test(void)
 
     TEST_SUMMARY("subsystem2");
 }
-
 #endif /* APP_TEST */

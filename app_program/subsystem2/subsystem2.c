@@ -1,6 +1,5 @@
 /** @file subsystem2.c
  *  @brief Subsystem 2 (Motion Control) 10 ms RTOS PID task & API implementation.
- *
  *  INF2004 Embedded Systems Programming - Subsystem 2 (Aldric)
  */
 #include <tk/tkernel.h>
@@ -10,7 +9,7 @@
 #include "drv_motor.h"
 #include "drv_encoder.h"
 
-#define TARGET_BASE_CRUISE_TICKS (1) /* Reduced to 3 ticks (~5 cm/s) */
+#define TARGET_BASE_CRUISE_TICKS (1) /* Reduced to 1 tick (~2 cm/s) */
 #define KP_SPEED (320)
 #define KI_SPEED (35)
 #define INTEGRAL_CLAMP (150)
@@ -94,19 +93,20 @@ void test_s2_flush_cmd_queue(void)
 /* ========================================================================= */
 /* Procedural API Implementations                                            */
 /* ========================================================================= */
-
 ER motion_move_forward(uint16_t distance_mm, uint8_t speed_duty)
 {
     if (s_mbf_motion_cmds <= 0 || s_emergency_latched)
     {
         return E_SYS;
     }
+
     motion_command_packed_t cmd = {
         .cmd_type = (uint32_t)MOTION_CMD_DRIVE_DISTANCE,
         .speed_duty = (speed_duty > 100u) ? 100u : speed_duty,
         .target_angle_deg = 0,
         .target_distance_mm = (distance_mm > 1023u) ? 1023u : distance_mm,
         .reserved = 0u};
+
     return tk_snd_mbf(s_mbf_motion_cmds, (void *)&cmd, sizeof(cmd), TMO_POL);
 }
 
@@ -116,12 +116,14 @@ ER motion_move_backward(uint16_t distance_mm, uint8_t speed_duty)
     {
         return E_SYS;
     }
+
     motion_command_packed_t cmd = {
         .cmd_type = (uint32_t)MOTION_CMD_DRIVE_DISTANCE,
         .speed_duty = (speed_duty > 100u) ? 100u : speed_duty,
         .target_angle_deg = -1, /* Negative indicates reverse travel */
         .target_distance_mm = (distance_mm > 1023u) ? 1023u : distance_mm,
         .reserved = 0u};
+
     return tk_snd_mbf(s_mbf_motion_cmds, (void *)&cmd, sizeof(cmd), TMO_POL);
 }
 
@@ -131,12 +133,14 @@ ER motion_point_turn(int16_t angle_deg, uint8_t speed_duty)
     {
         return E_SYS;
     }
+
     motion_command_packed_t cmd = {
         .cmd_type = (uint32_t)MOTION_CMD_POINT_TURN,
         .speed_duty = (speed_duty > 100u) ? 100u : speed_duty,
         .target_angle_deg = (angle_deg > 180) ? 180 : ((angle_deg < -180) ? -180 : angle_deg),
         .target_distance_mm = 0u,
         .reserved = 0u};
+
     return tk_snd_mbf(s_mbf_motion_cmds, (void *)&cmd, sizeof(cmd), TMO_POL);
 }
 
@@ -146,12 +150,14 @@ ER motion_start_continuous(uint8_t speed_duty)
     {
         return E_SYS;
     }
+
     motion_command_packed_t cmd = {
         .cmd_type = (uint32_t)MOTION_CMD_DRIVE_CONTINUOUS,
         .speed_duty = (speed_duty > 100u) ? 100u : speed_duty,
         .target_angle_deg = 0,
         .target_distance_mm = 0u,
         .reserved = 0u};
+
     return tk_snd_mbf(s_mbf_motion_cmds, (void *)&cmd, sizeof(cmd), TMO_POL);
 }
 
@@ -161,12 +167,14 @@ ER motion_stop(void)
     {
         return E_SYS;
     }
+
     motion_command_packed_t cmd = {
         .cmd_type = (uint32_t)MOTION_CMD_STOP,
         .speed_duty = 0u,
         .target_angle_deg = 0,
         .target_distance_mm = 0u,
         .reserved = 0u};
+
     return tk_snd_mbf(s_mbf_motion_cmds, (void *)&cmd, sizeof(cmd), TMO_POL);
 }
 
@@ -228,7 +236,6 @@ void motion_get_status(motion_status_packed_t *p_out_status)
 /* ========================================================================= */
 /* 10 ms Periodic Motion Task Loop                                           */
 /* ========================================================================= */
-
 static void flush_command_buffer(void)
 {
     motion_command_packed_t dummy;
@@ -271,8 +278,12 @@ static void parse_and_apply_command(const motion_command_packed_t *cmd)
 static int16_t line_drive_pwm(int32_t target_ticks, int8_t measured_ticks, int32_t steering_pwm)
 {
     /* Reverse counts mean no forward progress during line following. */
-    const int32_t forward_ticks = (measured_ticks > 0) ? measured_ticks : 0;
-    const int32_t pwm = MOTOR_DEADBAND_MIN_PWM + KP_SPEED * (target_ticks - forward_ticks) + steering_pwm;
+    const int32_t forward_ticks = (measured_ticks > 0) ? (int32_t)measured_ticks : 0;
+    int32_t pwm = MOTOR_DEADBAND_MIN_PWM + (KP_SPEED * (target_ticks - forward_ticks)) + steering_pwm;
+    if (pwm > (int32_t)MOTOR_PWM_WRAP_COUNT)
+    {
+        pwm = (int32_t)MOTOR_PWM_WRAP_COUNT;
+    }
     return (pwm > 0) ? (int16_t)pwm : 0;
 }
 
@@ -364,66 +375,32 @@ static void motion_control_task(INT stacd, void *p_exinf)
 
             /* 2. Compute target ticks dynamically based on commanded duty */
             const int32_t target_ticks = (int32_t)((TARGET_BASE_CRUISE_TICKS * s_active_speed_duty) / 50u);
-            const int32_t err_l = target_ticks - delta_l;
-            const int32_t err_r = target_ticks - delta_r;
 
-            /* 3. Conditional Integration (Anti-Windup):
-             *    Only integrate when speed is close to target (|err| <= 2).
-             *    If accelerating from standstill or overshooting, bleed accumulation. */
-            if (err_l >= -2 && err_l <= 2)
+            /* 3. Dynamic steering return handling */
+            if (line_mode)
             {
-                integ_l += err_l;
+                const int32_t requested_steer = (int32_t)s_latest_steering_offset * 35;
+                if (requested_steer != 0)
+                    line_steer_pwm = requested_steer;
+                else if (line_steer_pwm > LINE_STEER_RETURN_STEP_PWM)
+                    line_steer_pwm -= LINE_STEER_RETURN_STEP_PWM;
+                else if (line_steer_pwm < -LINE_STEER_RETURN_STEP_PWM)
+                    line_steer_pwm += LINE_STEER_RETURN_STEP_PWM;
+                else
+                    line_steer_pwm = 0;
             }
             else
             {
-                integ_l = (integ_l * 85) / 100; /* 15% leak per 10 ms */
+                line_steer_pwm = 0;
             }
 
-            if (err_r >= -2 && err_r <= 2)
-            {
-                integ_r += err_r;
-            }
-            else
-            {
-                integ_r = (integ_r * 85) / 100; /* 15% leak per 10 ms */
-            }
+            /* 4. Reset integrators to prevent any memory/windup buildup across ALL continuous driving */
+            integ_l = 0;
+            integ_r = 0;
 
-            /* 4. Strict anti-windup clamping */
-            if (integ_l > INTEGRAL_CLAMP)
-                integ_l = INTEGRAL_CLAMP;
-            if (integ_l < -INTEGRAL_CLAMP)
-                integ_l = -INTEGRAL_CLAMP;
-            if (integ_r > INTEGRAL_CLAMP)
-                integ_r = INTEGRAL_CLAMP;
-            if (integ_r < -INTEGRAL_CLAMP)
-                integ_r = -INTEGRAL_CLAMP;
-
-            /* 5. Feedforward Base PWM + PID Correction:
-             *    Provides a stable baseline (~2200 PWM at 35% duty) so
-             *    the integral accumulator does not have to do all the work. */
-            const int32_t ff_pwm = ((int32_t)s_active_speed_duty * 2500) / 40;
-            int32_t out_l = ff_pwm + (err_l * KP_SPEED) + (integ_l * KI_SPEED);
-            int32_t out_r = ff_pwm + (err_r * KP_SPEED) + (integ_r * KI_SPEED);
-
-            /* Clamp outputs to motor PWM limits */
-            if (out_l > 12500)
-                out_l = 12500;
-            if (out_l < 0)
-                out_l = 0;
-            if (out_r > 12500)
-                out_r = 12500;
-            if (out_r < 0)
-                out_r = 0;
-
-            /* 6. Lateral steering offset (Subsystem 3 line-following) */
-            if (s_line_mode_authorized)
-            {
-                const int32_t steer = (int32_t)s_latest_steering_offset * 40;
-                out_l += steer;
-                out_r -= steer;
-            }
-
-            drv_motor_set_speed((int16_t)out_l, (int16_t)out_r);
+            /* 5. Drive motors using feedforward floor + immediate proportional feedback */
+            drv_motor_set_speed(line_drive_pwm(target_ticks, delta_l, line_steer_pwm),
+                                line_drive_pwm(target_ticks, delta_r, -line_steer_pwm));
             break;
         }
 
@@ -538,7 +515,6 @@ static void motion_control_task(INT stacd, void *p_exinf)
 /* ========================================================================= */
 /* Subsystem Lifecycle Routines                                              */
 /* ========================================================================= */
-
 EXPORT ER subsystem2_init(void)
 {
     /* 1. Motion Command IPC */
@@ -564,6 +540,11 @@ EXPORT ER subsystem2_init(void)
 
 EXPORT ER subsystem2_start(void)
 {
+    if (s_tskid_motion > 0)
+    {
+        return E_OK; /* Idempotency check */
+    }
+
     /* Priority 5: Highest application task in system */
     s_tskid_motion = app_start_task(motion_control_task, 5, TP_PRC1, "motion_task");
     return (s_tskid_motion > 0) ? E_OK : E_SYS;

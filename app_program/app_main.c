@@ -69,6 +69,7 @@ EXPORT INT usermain(void)
 	CHECK(subsystem5_init(), "subsystem5_init");
 
 #if APP_TEST
+	/* Phase 1: Run 52 static register/logic unit tests BEFORE task execution */
 	tm_printf((UB *)"[TEST] === test run start ===\n");
 	subsystem2_test();
 	tm_printf((UB *)"[TEST] === test run end ===\n\n");
@@ -78,7 +79,7 @@ EXPORT INT usermain(void)
 	CHECK(subsystem2_start(), "subsystem2_start");
 
 #if APP_TEST
-	/* Phase 2 Test: Now that motion_control_task is active, run 5s API demo */
+	/* Phase 2: Now that motion_control_task is active, run 5s API demo */
 	run_live_actuator_demonstration_api();
 #endif
 
