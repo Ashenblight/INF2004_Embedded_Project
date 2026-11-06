@@ -26,13 +26,13 @@
 /* Encode a provisional STATUS telemetry packet.
  * Returns 0 on success, -1 on invalid input.
  */
-int mqtt_packet_encode_status(unsigned char *packet,
+int mqtt_packet_encode_status(unsigned char *p_packet,
                               unsigned int capacity,
                               unsigned int sequence,
                               unsigned int flags);
 
 /* Returns 0 for a valid STOP packet, -1 otherwise */
-int mqtt_packet_decode_stop(const unsigned char *packet,
+int mqtt_packet_decode_stop(const unsigned char *p_packet,
                             unsigned int length);
 
 
@@ -42,39 +42,41 @@ int mqtt_packet_decode_stop(const unsigned char *packet,
 /* Barcode result fields */
 typedef struct {
     unsigned int letter;           /* 0-25: A-Z */
-    unsigned int movement;         /* 0-none, 1-left, 2-right, 3-forward, 4-U-turn */
+    /* Values: 0-none, 1-left, 2-right, 3-forward, 4-U-turn. */
+    unsigned int movement;
     unsigned int mapping_status;   /* 0-mapped, 1-unmapped */
     unsigned int scan_id;          /* provisional: 0-255 */
     unsigned int mapping_revision; /* provisional: 0-255 */
 } mqtt_barcode_result_t;
 
 /* Encode a barcode result into a binary packet */
-int mqtt_packet_encode_barcode(unsigned char *packet,
+int mqtt_packet_encode_barcode(unsigned char *p_packet,
                                unsigned int capacity,
-                               const mqtt_barcode_result_t *result);
+                               const mqtt_barcode_result_t *p_result);
 
 /* Decode and validate a binary barcode result */
-int mqtt_packet_decode_barcode(const unsigned char *packet,
+int mqtt_packet_decode_barcode(const unsigned char *p_packet,
                                unsigned int length,
-                               mqtt_barcode_result_t *result);
+                               mqtt_barcode_result_t *p_result);
 
 
 /* Provisional 2-byte line-following status packet */
 #define MQTT_PACKET_LINE_STATUS_LENGTH 2U
 
 typedef struct {
-    unsigned int steering;          /* 0-straight, 1-left, 2-right, 3-uncertain */
+    /* Values: 0-straight, 1-left, 2-right, 3-uncertain. */
+    unsigned int steering;
     unsigned int line_enabled;      /* 0-disabled, 1-enabled */
     unsigned int scanning_enabled;  /* 0-disabled, 1-enabled */
 } mqtt_line_status_t;
 
-int mqtt_packet_encode_line_status(unsigned char *packet,
+int mqtt_packet_encode_line_status(unsigned char *p_packet,
                                    unsigned int capacity,
-                                   const mqtt_line_status_t *status);
+                                   const mqtt_line_status_t *p_status);
 
-int mqtt_packet_decode_line_status(const unsigned char *packet,
+int mqtt_packet_decode_line_status(const unsigned char *p_packet,
                                    unsigned int length,
-                                   mqtt_line_status_t *status);
+                                   mqtt_line_status_t *p_status);
 
 
 /* Provisional PC barcode mapping configuration */
@@ -92,13 +94,13 @@ typedef struct {
 } mqtt_barcode_map_t;
 
 /* Encode barcode mapping configuration */
-int mqtt_packet_encode_barcode_map(unsigned char *packet,
+int mqtt_packet_encode_barcode_map(unsigned char *p_packet,
                                    unsigned int capacity,
-                                   const mqtt_barcode_map_t *mapping);
+                                   const mqtt_barcode_map_t *p_mapping);
 
 /* Decode barcode mapping configuration */
-int mqtt_packet_decode_barcode_map(const unsigned char *packet,
+int mqtt_packet_decode_barcode_map(const unsigned char *p_packet,
                                    unsigned int length,
-                                   mqtt_barcode_map_t *mapping);
+                                   mqtt_barcode_map_t *p_mapping);
 
 #endif /* MQTT_PACKET_H */

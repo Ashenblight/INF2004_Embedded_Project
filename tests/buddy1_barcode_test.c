@@ -14,16 +14,19 @@ int main(void)
 
     /* test barcode encoding */
     if (mqtt_packet_encode_barcode(packet, sizeof(packet),
-                                   &input) != 0) {
+                                   &input) != 0)
+    {
         printf("TEST FAILED: encoding\n");
         return 1;
     }
 
     printf("Encoded barcode: ");
-    for (i = 0; i < MQTT_PACKET_BARCODE_LENGTH; i++) {
+    for (i = 0; i < MQTT_PACKET_BARCODE_LENGTH; i++)
+    {
         printf("%02X ", packet[i]);
 
-        if (packet[i] != expected[i]) {
+        if (packet[i] != expected[i])
+        {
             printf("\nTEST FAILED: wrong packet\n");
             return 1;
         }
@@ -32,7 +35,8 @@ int main(void)
 
     /* test barcode decoding */
     if (mqtt_packet_decode_barcode(packet, sizeof(packet),
-                                   &output) != 0) {
+                                   &output) != 0)
+    {
         printf("TEST FAILED: decoding\n");
         return 1;
     }
@@ -42,7 +46,8 @@ int main(void)
         output.movement != input.movement ||
         output.mapping_status != input.mapping_status ||
         output.scan_id != input.scan_id ||
-        output.mapping_revision != input.mapping_revision) {
+        output.mapping_revision != input.mapping_revision)
+    {
         printf("TEST FAILED: decoded values\n");
         return 1;
     }
@@ -57,7 +62,8 @@ int main(void)
     /* reject invalid barcode letter */
     input.letter = 26;
     if (mqtt_packet_encode_barcode(packet, sizeof(packet),
-                                   &input) != -1) {
+                                   &input) != -1)
+    {
         printf("TEST FAILED: invalid letter accepted\n");
         return 1;
     }
@@ -66,7 +72,8 @@ int main(void)
     /* reject invalid movement */
     input.movement = 5;
     if (mqtt_packet_encode_barcode(packet, sizeof(packet),
-                                   &input) != -1) {
+                                   &input) != -1)
+    {
         printf("TEST FAILED: invalid movement accepted\n");
         return 1;
     }
@@ -75,7 +82,8 @@ int main(void)
     /* reject incorrect protocol version */
     packet[0] = 0x24;
     if (mqtt_packet_decode_barcode(packet, sizeof(packet),
-                                   &output) != -1) {
+                                   &output) != -1)
+    {
         printf("TEST FAILED: wrong version accepted\n");
         return 1;
     }
@@ -84,7 +92,8 @@ int main(void)
     /* reject nonzero padding */
     packet[4] = 0x01;
     if (mqtt_packet_decode_barcode(packet, sizeof(packet),
-                                   &output) != -1) {
+                                   &output) != -1)
+    {
         printf("TEST FAILED: invalid padding accepted\n");
         return 1;
     }
@@ -92,7 +101,8 @@ int main(void)
 
     /* reject incorrect packet length */
     if (mqtt_packet_decode_barcode(packet, sizeof(packet) - 1,
-                                   &output) != -1) {
+                                   &output) != -1)
+    {
         printf("TEST FAILED: wrong length accepted\n");
         return 1;
     }

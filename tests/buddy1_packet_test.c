@@ -104,7 +104,8 @@ int main(void)
         status_small_buffer == -1 &&
         status_invalid_sequence == -1 &&
         status_invalid_flags == -1 &&
-        status_null == -1) {
+        status_null == -1)
+    {
         printf("TEST PASSED\n");
         return 0;
     }

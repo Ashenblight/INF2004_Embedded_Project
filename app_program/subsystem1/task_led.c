@@ -38,13 +38,13 @@ static void mqtt_test_send_telemetry(void);
 /**
  * @brief Request an LED task wake-up at each cyclic interval.
  *
- * @param[in] exinf Kernel-supplied information (unused).
+ * @param[in] p_exinf Kernel-supplied information (unused).
  *
  * @note Runs as a cyclic handler and must not block.
  */
-EXPORT void led_cyclic_handler(void *exinf)
+EXPORT void led_cyclic_handler(void *p_exinf)
 {
-    (void)exinf;
+    (void)p_exinf;
     tk_wup_tsk(tid_led);
 }
 
@@ -52,14 +52,14 @@ EXPORT void led_cyclic_handler(void *exinf)
  * @brief Toggle the LED whenever the task is awakened.
  *
  * @param[in] stacd Task startup code (unused).
- * @param[in] exinf Task extended information (unused).
+ * @param[in] p_exinf Task extended information (unused).
  */
-EXPORT void led_task(INT stacd, void *exinf)
+EXPORT void led_task(INT stacd, void *p_exinf)
 {
     bool led_level = false;
 
     (void)stacd;
-    (void)exinf;
+    (void)p_exinf;
 
     gpio_set_pin(S1_LED_PIN, GPIO_MODE_OUT);
 
@@ -77,16 +77,16 @@ EXPORT void led_task(INT stacd, void *exinf)
  * @brief Run the temporary MQTT communication test task.
  *
  * @param[in] stacd Task startup code.
- * @param[in] exinf Task extended information.
+ * @param[in] p_exinf Task extended information.
  */
-EXPORT void mqtt_rx_test_task(INT stacd, void *exinf)
+EXPORT void mqtt_rx_test_task(INT stacd, void *p_exinf)
 {
     static unsigned char rx_buffer[MQTT_BRIDGE_MSG_MAX];
     unsigned int telemetry_ticks = 0;
     int message_length = 0;
 
     (void)stacd;
-    (void)exinf;
+    (void)p_exinf;
 
     for (;;)
     {

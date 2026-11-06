@@ -18,7 +18,7 @@
  *     0 : successfully queued
  *   < 0 : invalid message, buffer not ready/full or other error
  */
-int mqtt_bridge_tx_send(const unsigned char *data,
+int mqtt_bridge_tx_send(const unsigned char *p_data,
                         unsigned int length);
 /*
  * Try to retrieve one outgoing message from TX.
@@ -28,7 +28,7 @@ int mqtt_bridge_tx_send(const unsigned char *data,
  *     0 : no message available or bridge not ready
  *   < 0 : other error
  */
-int mqtt_bridge_tx_receive(unsigned char *data,
+int mqtt_bridge_tx_receive(unsigned char *p_data,
                            unsigned int capacity);
 
 /*
@@ -38,7 +38,7 @@ int mqtt_bridge_tx_receive(unsigned char *data,
  *     0 : successfully queued
  *   < 0 : not ready, buffer full or other error
  */
-int mqtt_bridge_rx_send(const unsigned char *data,
+int mqtt_bridge_rx_send(const unsigned char *p_data,
                         unsigned int length);
 /*
  * Try to retrieve one incoming message from RX.
@@ -48,6 +48,6 @@ int mqtt_bridge_rx_send(const unsigned char *data,
  *     0 : no message available or bridge not ready
  *   < 0 : invalid argument or other error
  */
-int mqtt_bridge_rx_receive(unsigned char *data,
+int mqtt_bridge_rx_receive(unsigned char *p_data,
                            unsigned int capacity);
 #endif

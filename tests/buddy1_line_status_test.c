@@ -11,7 +11,8 @@ int main(void)
     /* test encoding */
     if (mqtt_packet_encode_line_status(packet,
                                        sizeof(packet),
-                                       &input) != 0) {
+                                       &input) != 0)
+    {
         printf("TEST FAILED: encoding\n");
         return 1;
     }
@@ -20,7 +21,8 @@ int main(void)
            packet[0], packet[1]);
 
     /* check expected packet */
-    if (packet[0] != 0x16 || packet[1] != 0x70) {
+    if (packet[0] != 0x16 || packet[1] != 0x70)
+    {
         printf("TEST FAILED: incorrect packet\n");
         return 1;
     }
@@ -28,7 +30,8 @@ int main(void)
     /* test decoding */
     if (mqtt_packet_decode_line_status(packet,
                                        sizeof(packet),
-                                       &output) != 0) {
+                                       &output) != 0)
+    {
         printf("TEST FAILED: decoding\n");
         return 1;
     }
@@ -36,7 +39,8 @@ int main(void)
     /* check decoded values */
     if (output.steering != input.steering ||
         output.line_enabled != input.line_enabled ||
-        output.scanning_enabled != input.scanning_enabled) {
+        output.scanning_enabled != input.scanning_enabled)
+    {
         printf("TEST FAILED: decoded values\n");
         return 1;
     }
@@ -50,7 +54,8 @@ int main(void)
     /* reject invalid steering */
     input.steering = 4;
     if (mqtt_packet_encode_line_status(packet, sizeof(packet),
-                                       &input) != -1) {
+                                       &input) != -1)
+    {
         printf("TEST FAILED: invalid steering accepted\n");
         return 1;
     }
@@ -59,7 +64,8 @@ int main(void)
     /* reject invalid enable flag */
     input.line_enabled = 2;
     if (mqtt_packet_encode_line_status(packet, sizeof(packet),
-                                       &input) != -1) {
+                                       &input) != -1)
+    {
         printf("TEST FAILED: invalid flag accepted\n");
         return 1;
     }
@@ -68,7 +74,8 @@ int main(void)
     /* reject wrong protocol version */
     packet[0] = 0x26;
     if (mqtt_packet_decode_line_status(packet, sizeof(packet),
-                                       &output) != -1) {
+                                       &output) != -1)
+    {
         printf("TEST FAILED: wrong version accepted\n");
         return 1;
     }
@@ -77,7 +84,8 @@ int main(void)
     /* reject wrong message type */
     packet[0] = 0x17;
     if (mqtt_packet_decode_line_status(packet, sizeof(packet),
-                                       &output) != -1) {
+                                       &output) != -1)
+    {
         printf("TEST FAILED: wrong type accepted\n");
         return 1;
     }
@@ -86,7 +94,8 @@ int main(void)
     /* reject nonzero padding */
     packet[1] = 0x71;
     if (mqtt_packet_decode_line_status(packet, sizeof(packet),
-                                       &output) != -1) {
+                                       &output) != -1)
+    {
         printf("TEST FAILED: invalid padding accepted\n");
         return 1;
     }
@@ -94,7 +103,8 @@ int main(void)
 
     /* reject incorrect packet length */
     if (mqtt_packet_decode_line_status(packet, 1,
-                                       &output) != -1) {
+                                       &output) != -1)
+    {
         printf("TEST FAILED: wrong length accepted\n");
         return 1;
     }

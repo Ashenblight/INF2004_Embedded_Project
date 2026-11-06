@@ -23,16 +23,19 @@ int main(void)
 
     /* test encoding */
     if (mqtt_packet_encode_barcode_map(packet, sizeof(packet),
-                                       &input) != 0) {
+                                       &input) != 0)
+    {
         printf("TEST FAILED: encoding\n");
         return 1;
     }
 
     printf("Encoded mapping: ");
-    for (i = 0; i < MQTT_PACKET_BARCODE_MAP_LENGTH; i++) {
+    for (i = 0; i < MQTT_PACKET_BARCODE_MAP_LENGTH; i++)
+    {
         printf("%02X ", packet[i]);
 
-        if (packet[i] != expected[i]) {
+        if (packet[i] != expected[i])
+        {
             printf("\nTEST FAILED: incorrect packet\n");
             return 1;
         }
@@ -41,20 +44,24 @@ int main(void)
 
     /* test decoding */
     if (mqtt_packet_decode_barcode_map(packet, sizeof(packet),
-                                       &output) != 0) {
+                                       &output) != 0)
+    {
         printf("TEST FAILED: decoding\n");
         return 1;
     }
 
     /* check decoded values */
-    if (output.revision != input.revision) {
+    if (output.revision != input.revision)
+    {
         printf("TEST FAILED: mapping revision\n");
         return 1;
     }
 
-    for (i = 0; i < MQTT_PACKET_BARCODE_MAP_COUNT; i++) {
+    for (i = 0; i < MQTT_PACKET_BARCODE_MAP_COUNT; i++)
+    {
         if (output.entries[i].letter != input.entries[i].letter ||
-            output.entries[i].movement != input.entries[i].movement) {
+            output.entries[i].movement != input.entries[i].movement)
+        {
             printf("TEST FAILED: decoded mapping\n");
             return 1;
         }
@@ -66,7 +73,8 @@ int main(void)
     /* reject duplicate barcode letters */
     input.entries[1].letter = 0;
     if (mqtt_packet_encode_barcode_map(packet, sizeof(packet),
-                                       &input) != -1) {
+                                       &input) != -1)
+    {
         printf("TEST FAILED: duplicate letter accepted\n");
         return 1;
     }
@@ -75,7 +83,8 @@ int main(void)
     input.entries[1].letter = 1;
     input.entries[1].movement = 5;
     if (mqtt_packet_encode_barcode_map(packet, sizeof(packet),
-                                       &input) != -1) {
+                                       &input) != -1)
+    {
         printf("TEST FAILED: invalid movement accepted\n");
         return 1;
     }
@@ -83,7 +92,8 @@ int main(void)
     /* reject wrong packet length */
     if (mqtt_packet_decode_barcode_map(expected,
                                        sizeof(expected) - 1,
-                                       &output) != -1) {
+                                       &output) != -1)
+    {
         printf("TEST FAILED: invalid length accepted\n");
         return 1;
     }
@@ -97,7 +107,8 @@ int main(void)
         /* reject wrong protocol version */
         bad[0] = 0x27;
         if (mqtt_packet_decode_barcode_map(bad, sizeof(bad),
-                                           &output) != -1) {
+                                           &output) != -1)
+        {
             printf("TEST FAILED: wrong version accepted\n");
             return 1;
         }
@@ -106,7 +117,8 @@ int main(void)
         /* reject wrong message type */
         bad[0] = 0x18;
         if (mqtt_packet_decode_barcode_map(bad, sizeof(bad),
-                                           &output) != -1) {
+                                           &output) != -1)
+        {
             printf("TEST FAILED: wrong type accepted\n");
             return 1;
         }
@@ -115,7 +127,8 @@ int main(void)
         /* reject invalid barcode letter (26) */
         bad[2] = 0xD1;
         if (mqtt_packet_decode_barcode_map(bad, sizeof(bad),
-                                           &output) != -1) {
+                                           &output) != -1)
+        {
             printf("TEST FAILED: invalid letter accepted\n");
             return 1;
         }
@@ -124,7 +137,8 @@ int main(void)
         /* reject movement code 0 */
         bad[2] = 0x00;
         if (mqtt_packet_decode_barcode_map(bad, sizeof(bad),
-                                           &output) != -1) {
+                                           &output) != -1)
+        {
             printf("TEST FAILED: movement 0 accepted\n");
             return 1;
         }
@@ -133,7 +147,8 @@ int main(void)
         /* reject duplicate barcode letters */
         bad[3] = 0x02;
         if (mqtt_packet_decode_barcode_map(bad, sizeof(bad),
-                                           &output) != -1) {
+                                           &output) != -1)
+        {
             printf("TEST FAILED: duplicate letter accepted\n");
             return 1;
         }

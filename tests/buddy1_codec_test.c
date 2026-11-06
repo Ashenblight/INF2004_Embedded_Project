@@ -44,8 +44,10 @@ int main(void)
     int steering_read = mqtt_bits_read(packet, 1, 3, 2, &steering_decoded);
     int stopped_read = mqtt_bits_read(packet, 1, 5, 1, &stopped_decoded);
 
-    printf("Decoded barcode: %u (result=%d)\n", barcode_decoded, barcode_read);
-    printf("Decoded steering: %u (result=%d)\n", steering_decoded, steering_read);
+    printf("Decoded barcode: %u (result=%d)\n",
+           barcode_decoded, barcode_read);
+    printf("Decoded steering: %u (result=%d)\n",
+           steering_decoded, steering_read);
     printf("Decoded stopped: %u (result=%d)\n", stopped_decoded, stopped_read);
 
     /* Test writing and reading across two bytes */
@@ -191,7 +193,8 @@ if (write_result == 0 &&
     overflow_write == -1 &&
     overflow_read == -1 &&
     overflow_buffer[0] == 0xA5 &&
-    overflow_decoded == 123) {
+    overflow_decoded == 123)
+{
     printf("TEST PASSED\n");
     return 0;
 }
