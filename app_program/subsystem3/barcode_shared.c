@@ -56,21 +56,36 @@ static bool same(const barcode_mapping_entry_t *a, const barcode_mapping_entry_t
 }
 ER barcode_mapping_apply(const barcode_mapping_entry_t entries[4], uint16_t revision)
 {
+    unsigned actions = 0U;
+    if (entries == NULL)
+        return E_PAR;
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        if (entries[i].movement < 1U || entries[i].movement > 4U ||
+            (actions & (1U << entries[i].movement)) != 0U)
+            return E_PAR;
+        actions |= 1U << entries[i].movement;
+    }
+    return barcode_mapping_apply_count(entries, 4U, revision);
+}
+ER barcode_mapping_apply_count(const barcode_mapping_entry_t *entries, unsigned count, uint16_t revision)
+{
     barcode_mapping_entry_t candidate[4];
     uint32_t letters = 0U;
-    unsigned actions = 0U, i;
+    unsigned i;
     ER result;
-    if (entries == NULL || revision == 0U)
+    if (entries == NULL || count == 0U || count > 4U || revision == 0U)
         return E_PAR;
     for (i = 0; i < 4; ++i)
+        candidate[i] = (barcode_mapping_entry_t){255U, BARCODE_MOVE_NONE};
+    for (i = 0; i < count; ++i)
     {
         candidate[i] = entries[i];
         if (candidate[i].letter >= 26U || candidate[i].movement < 1U || candidate[i].movement > 4U)
             return E_PAR;
-        if ((letters & (1UL << candidate[i].letter)) || (actions & (1U << candidate[i].movement)))
+        if (letters & (1UL << candidate[i].letter))
             return E_PAR;
         letters |= 1UL << candidate[i].letter;
-        actions |= 1U << candidate[i].movement;
     }
     if (mutex_id <= 0)
         return E_OBJ;
@@ -110,6 +125,21 @@ ER barcode_mapping_apply_wire(const uint8_t *bytes, unsigned length)
     }
     return barcode_mapping_apply(entries, (uint16_t)(((uint16_t)bytes[2] << 8U) | bytes[3]));
 }
+int barcode_mapping_apply_mqtt(const unsigned char *payload, unsigned length)
+{
+    if (payload == NULL || (length != 5U && length != 6U) || payload[0] != 0x17U)
+        return E_PAR;
+    const unsigned count = length - 2U;
+    barcode_mapping_entry_t entries[4];
+    for (unsigned i = 0; i < count; ++i)
+    {
+        entries[i].letter = payload[2U + i] >> 3U;
+        entries[i].movement = payload[2U + i] & 7U;
+    }
+    const ER result = barcode_mapping_apply_count(entries, count, (uint16_t)payload[1] + 1U);
+    return result == E_TMOUT ? 1 : result;
+}
+
 ER barcode_mapping_copy(barcode_mapping_entry_t entries[4], uint16_t *revision)
 {
     unsigned i;

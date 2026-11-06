@@ -14,5 +14,10 @@
  * than once -- a second call while already connecting/connected is a no-op.
  */
 void mqtt_utk_start(void);
+/* Register during application init. Handler runs on the existing network-owner
+ * task after complete binary payload assembly. Return 0 on acceptance, 1 to
+ * retry a temporarily busy application, or a negative value to reject. */
+typedef int (*mqtt_mapping_handler_t)(const unsigned char *payload, unsigned length);
+void mqtt_utk_set_mapping_handler(mqtt_mapping_handler_t handler);
 
 #endif /* MQTT_UTK_H */

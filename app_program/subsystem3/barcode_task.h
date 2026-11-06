@@ -1,7 +1,7 @@
 #ifndef BARCODE_TASK_H
 #define BARCODE_TASK_H
 #include "../app.h"
-#include "barcode_message.h"
+#include "navigation_message.h"
 #include "barcode_shared.h"
 
 typedef struct
@@ -9,6 +9,13 @@ typedef struct
     UW samples, rejected, decoded, input_drops, output_drops, restarts;
     UW cancelled;
 } barcode_task_status_t;
+typedef struct
+{
+    barcode_guess_t guess;
+    barcode_movement_t movement;
+    uint16_t mapping_revision;
+    uint32_t request_id;
+} barcode_junction_result_t;
 ER barcode_task_init(void);
 ER barcode_task_start(void);
 /* Init phase, BEFORE start: bind the CONTROLLER-OWNED MBF_NAV_EVENTS and
@@ -18,7 +25,7 @@ ER barcode_task_start(void);
  */
 ER barcode_task_bind_controller(ID event_buffer, ID controller_flag, UINT event_bit,
                                 UINT fault_bit);
-/* Controller task only. Start disabled; a complete MQTT map is required.
+/* Controller task only. Start disabled; a configured movement map is required.
  * Normal builds require a working current encoder snapshot getter and ready
  * capture hardware. E_TMOUT before the worker starts capture: retry later in
  * the normal controller loop; do not busy-wait in the high-priority initial task.
@@ -42,6 +49,13 @@ ER barcode_task_submit_sample(bool black, uint32_t encoder_position, bool restar
  */
 ER barcode_task_receive_result(barcode_message_t *message, TMO timeout);
 ER barcode_task_get_status(barcode_task_status_t *status);
+/* Diagnostic capture starts fresh on GP20 Start and prints once at a junction.
+ * Single controller-task producer on either core; the worker performs the print. */
+void barcode_task_reset_raw_trace(void);
+void barcode_task_request_raw_dump(void);
+/* Consume the result of the current junction request once. E_TMOUT while
+ * pending. A new GP20 Start cancels any previous request/result. */
+ER barcode_task_receive_junction_result(barcode_junction_result_t *result);
 #if APP_TEST
 void barcode_selftest(void);
 #endif

@@ -8,6 +8,19 @@
 
 typedef struct
 {
+    uint8_t letter; /* Best candidate, or BARCODE_NO_LETTER if no usable symbol. */
+    uint8_t score, margin; /* Fit scores, not calibrated probabilities. */
+    bool accepted, reversed, complete;
+} barcode_guess_t;
+
+/* Raw time-width fallback. First run is black. Zero mask considers all A-Z.
+ * Require a reliable start and nine completed letter runs. A truncated trace
+ * can be used only if a complete frame is present before the truncation. */
+barcode_guess_t barcode_guess_runs(const uint32_t *widths, unsigned count,
+                                  bool truncated, uint32_t allowed_letters);
+
+typedef struct
+{
     uint16_t min_element_ticks;
     uint16_t max_element_ticks;
     uint16_t max_sample_step_ticks;

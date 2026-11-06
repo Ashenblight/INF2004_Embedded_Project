@@ -152,13 +152,14 @@ static uint32_t add_quiet(uint32_t quiet, uint32_t step)
     return quiet >= 655350U - step ? 655350U : quiet + step;
 }
 
-static void begin_frame(barcode_decoder_t *d, uint32_t quiet, int8_t sign)
+static void begin_frame(barcode_decoder_t *d, uint32_t quiet)
 {
     d->phase = ELEMENTS;
     d->count = 0U;
     d->run_ticks = 0U;
     d->leading_quiet_ticks = quiet;
-    d->movement_sign = sign;
+    /* Establish direction from travel within the first bar, not its entry edge. */
+    d->movement_sign = 0;
 }
 
 barcode_feed_result_t barcode_decoder_feed(barcode_decoder_t *d, bool black, uint32_t position,
@@ -206,7 +207,7 @@ barcode_feed_result_t barcode_decoder_feed(barcode_decoder_t *d, bool black, uin
         if (black && !previous_black)
         {
             if (d->quiet_ticks >= (uint32_t)d->config.min_element_ticks * 10U)
-                begin_frame(d, d->quiet_ticks, sign);
+                begin_frame(d, d->quiet_ticks);
             d->quiet_ticks = 0U;
         }
         else if (previous_black && !black)
@@ -220,7 +221,7 @@ barcode_feed_result_t barcode_decoder_feed(barcode_decoder_t *d, bool black, uin
         {
             *character = d->pending;
             if (black)
-                begin_frame(d, d->run_ticks, sign);
+                begin_frame(d, d->run_ticks);
             else
             {
                 d->phase = SEEK;
@@ -254,4 +255,126 @@ barcode_feed_result_t barcode_decoder_feed(barcode_decoder_t *d, bool black, uin
 bool barcode_decoder_in_progress(const barcode_decoder_t *d)
 {
     return d != NULL && d->configured && d->have_sample && d->phase != SEEK;
+}
+
+static bool width_membership(const uint32_t *widths, uint8_t membership[9])
+{
+    uint32_t sorted[9];
+    memcpy(sorted, widths, sizeof(sorted));
+    for (unsigned i = 1; i < 9; ++i)
+    {
+        const uint32_t value = sorted[i];
+        unsigned j = i;
+        while (j > 0 && sorted[j - 1] > value)
+        {
+            sorted[j] = sorted[j - 1];
+            --j;
+        }
+        sorted[j] = value;
+    }
+    const uint32_t narrow = (uint32_t)(((uint64_t)sorted[2] + sorted[3]) / 2U);
+    const uint32_t wide = sorted[7];
+    const uint64_t wide_total = (uint64_t)sorted[6] + sorted[7] + sorted[8];
+    if (sorted[0] == 0 || narrow == 0 ||
+        (uint64_t)wide * 10U < (uint64_t)narrow * 18U ||
+        (uint64_t)wide > (uint64_t)narrow * 6U ||
+        (uint64_t)sorted[6] * 5U < (uint64_t)sorted[5] * 6U ||
+        (uint64_t)sorted[8] * 2U >= wide_total)
+        return false;
+    for (unsigned i = 0; i < 9; ++i)
+    {
+        if (widths[i] <= narrow)
+            membership[i] = 0;
+        else if (widths[i] >= wide)
+            membership[i] = 100;
+        else
+            membership[i] = (uint8_t)(((uint64_t)(widths[i] - narrow) * 100U) / (wide - narrow));
+    }
+    return true;
+}
+
+static uint8_t pattern_score(const uint8_t membership[9], uint16_t pattern)
+{
+    unsigned total = 0;
+    for (unsigned i = 0; i < 9; ++i)
+        total += (pattern & (1U << (8U - i))) ? membership[i] : 100U - membership[i];
+    return (uint8_t)(total / 9U);
+}
+
+barcode_guess_t barcode_guess_runs(const uint32_t *widths, unsigned count,
+                                  bool truncated, uint32_t allowed_letters)
+{
+    barcode_guess_t result = {.letter = BARCODE_NO_LETTER};
+    uint8_t scores[26] = {0};
+    uint32_t reversed_letters = 0, complete_letters = 0;
+    if (widths == NULL || count < 20U)
+        return result;
+    if (allowed_letters == 0U)
+        allowed_letters = (1UL << 26U) - 1U;
+    for (unsigned start = 0; start + 20U <= count; start += 2U)
+    {
+        uint8_t start_membership[9], data_membership[9], end_membership[9];
+        if (!width_membership(widths + start, start_membership) ||
+            !width_membership(widths + start + 10U, data_membership))
+            continue;
+        const bool have_end = start + 30U <= count &&
+                              width_membership(widths + start + 20U, end_membership);
+        for (unsigned reverse = 0; reverse < 2U; ++reverse)
+        {
+            const uint16_t star = reverse ? reverse_pattern(STAR_PATTERN) : STAR_PATTERN;
+            const uint8_t marker_score = pattern_score(start_membership, star);
+            if (marker_score < 90U)
+                continue;
+            const bool complete = have_end && pattern_score(end_membership, star) >= 90U;
+            if (truncated && !complete)
+                continue;
+            for (unsigned letter = 0; letter < 26U; ++letter)
+            {
+                const uint16_t pattern = reverse ? reverse_pattern(letters[letter]) : letters[letter];
+                uint8_t score = pattern_score(data_membership, pattern);
+                if (score > marker_score)
+                    score = marker_score;
+                if (!complete)
+                    score = score > 5U ? score - 5U : 0U;
+                if (score <= scores[letter])
+                    continue;
+                scores[letter] = score;
+                const uint32_t bit = 1UL << letter;
+                reversed_letters = (reversed_letters & ~bit) | (reverse ? bit : 0U);
+                complete_letters = (complete_letters & ~bit) | (complete ? bit : 0U);
+            }
+        }
+    }
+    uint8_t best = BARCODE_NO_LETTER, best_all = BARCODE_NO_LETTER;
+    unsigned second = 0, best_unmapped = 0;
+    for (unsigned letter = 0; letter < 26U; ++letter)
+    {
+        if (scores[letter] == 0U)
+            continue;
+        if (best_all == BARCODE_NO_LETTER || scores[letter] > scores[best_all])
+            best_all = (uint8_t)letter;
+        if ((allowed_letters & (1UL << letter)) == 0U)
+        {
+            if (scores[letter] > best_unmapped)
+                best_unmapped = scores[letter];
+            continue;
+        }
+        if (best == BARCODE_NO_LETTER || scores[letter] > scores[best])
+        {
+            second = best == BARCODE_NO_LETTER ? 0U : scores[best];
+            best = (uint8_t)letter;
+        }
+        else if (scores[letter] > second)
+            second = scores[letter];
+    }
+    if (best_all == BARCODE_NO_LETTER)
+        return result;
+    const bool mapped_best = best != BARCODE_NO_LETTER && best_unmapped < scores[best];
+    result.letter = mapped_best ? best : best_all;
+    result.score = scores[result.letter];
+    result.margin = mapped_best ? (uint8_t)(scores[best] - second) : 0U;
+    result.accepted = mapped_best && result.score >= 85U && result.margin >= 15U;
+    result.reversed = (reversed_letters & (1UL << result.letter)) != 0U;
+    result.complete = (complete_letters & (1UL << result.letter)) != 0U;
+    return result;
 }

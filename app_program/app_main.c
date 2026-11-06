@@ -4,6 +4,7 @@
  */
 
 #include "app.h"
+#include "subsystem3/line_task.h"
 #include <stdint.h>
 
 EXPORT ID app_start_task(FP entry, PRI pri, UW prc, const char *name)
@@ -76,10 +77,17 @@ EXPORT INT usermain(void)
 	/* Instead of silent tk_slp_tsk, print a heartbeat every 2 seconds so
 	   you can always verify the terminal connection at any time. */
 	uint32_t count = 0;
+	static const char *const directions[] = {"STRAIGHT", "LEFT", "RIGHT", "CROSS_JUNCTION"};
 	while (1)
 	{
 		tk_dly_tsk(2000);
-		tm_printf((UB *)"[HEARTBEAT] Pico alive (#%u)\n", ++count);
+		line_task_status_t line;
+		const char *direction = "UNAVAILABLE";
+		if (line_task_get_latest(&line) == E_OK && (line.packed & LINE_STATUS_VALID_MASK) != 0U)
+		{
+			direction = directions[(line.packed & LINE_STATUS_STEERING_MASK) >> LINE_STATUS_STEERING_SHIFT];
+		}
+		tm_printf((UB *)"[HEARTBEAT] Pico alive (#%u) direction=%s\n", ++count, direction);
 	}
 
 	return 0;

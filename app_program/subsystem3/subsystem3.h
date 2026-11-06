@@ -1,6 +1,6 @@
 /*
  *	subsystem3.h
- *	Subsystem 3 -- Buddy 3 line sensing plus retained statistics example.
+ *	Subsystem 3 -- line following, barcode sensing and retained statistics example.
  *
  *	Public interface of subsystem 3.  Other subsystems include it as
  *	"../subsystem3/subsystem3.h".

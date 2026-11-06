@@ -1,4 +1,4 @@
-/** Barcode hardware access. The Motion Control adapter lives in barcode_encoder.c. */
+/** Barcode GPIO/timer access and live Motion Control encoder snapshots. */
 #ifndef BARCODE_PORT_H
 #define BARCODE_PORT_H
 #include "../app.h"
