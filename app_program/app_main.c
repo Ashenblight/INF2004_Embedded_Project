@@ -4,13 +4,9 @@
  */
 
 #include "app.h"
+#include "subsystem2/subsystem2.h"
 #include "subsystem3/line_task.h"
 #include <stdint.h>
-
-#if APP_TEST
-/* Prototype for live public API actuator demo implemented in subsystem2_test.c */
-extern void run_live_actuator_demonstration_api(void);
-#endif
 
 EXPORT ID app_start_task(FP entry, PRI pri, UW prc, const char *name)
 {
@@ -81,7 +77,7 @@ EXPORT INT usermain(void)
 
 #if APP_TEST
 	/* Phase 2: Now that motion_control_task is active, run 5s API demo */
-	run_live_actuator_demonstration_api();
+	subsystem2_run_live_demo();
 #endif
 
 	CHECK(subsystem3_start(), "subsystem3_start");
