@@ -8,6 +8,7 @@
 #include "subsystem4.h"
 #include "imu_driver.h"
 #include "imu_processing.h"
+#include "lift_detection.h"
 #include "terrain_detection.h"
 #include "terrain_packet.h"
 #include "terrain_event_queue.h"
@@ -32,6 +33,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
     IMU_ACCEL_SAMPLE sample = {0};
     IMU_PROCESSING_STATE state = {0};
     TERRAIN_DETECTOR detector = {0};
+    lift_detection_t lift_detector = {0};
 
     UB packet[S4_PACKET_EVENT_SIZE];
     UB summary[S4_SUMMARY_MAX + 1];
@@ -74,6 +76,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
 
     imu_processing_reset(&state);
     terrain_detection_reset(&detector);
+    lift_detection_reset(&lift_detector);
     s4_event_queue_reset(&event_queue);
 
     tm_printf((UB*)"[IMU] Buddy 4 monitoring started\n");
@@ -127,7 +130,26 @@ EXPORT void monitor_task(INT stacd, void *exinf)
                 slow_reads++;
             }
 
-            if (er == E_OK) {
+            if (er == E_OK)
+            {
+                /* Check raw acceleration before filtering. */
+                if (false == lift_detector.b_detected)
+                {
+                    if (true == lift_detection_update(
+                            &lift_detector, &sample))
+                    {
+                        (void)tk_set_flg(
+                            flg_s4_faults,
+                            S4_FAULT_LIFT
+                        );
+
+                        /* The console API expects a UB pointer. */
+                        tm_printf(
+                            (UB*)"[IMU] Possible lift detected\n"
+                        );
+                    }
+                }
+
                 er = imu_processing_update(
                     &state,
                     &sample
@@ -155,6 +177,12 @@ EXPORT void monitor_task(INT stacd, void *exinf)
 
                 imu_driver_close();
                 imu_processing_reset(&state);
+
+                /* Reset stale samples but preserve a detected lift. */
+                if (false == lift_detector.b_detected)
+                {
+                    lift_detection_reset(&lift_detector);
+                }
             }
         }
 
@@ -172,7 +200,6 @@ EXPORT void monitor_task(INT stacd, void *exinf)
         if (er == E_OK && terrain_events != 0) {
             pending_events |= terrain_events;
 
-
             /* Store events in arrival order. */
             if (!s4_event_queue_push(
                     &event_queue,
@@ -184,7 +211,6 @@ EXPORT void monitor_task(INT stacd, void *exinf)
                     S4_FAULT_EVENT_OVERFLOW
                 );
             }
-
 
             /* Set the fault flags. */
             fault_bits = 0;
@@ -205,7 +231,6 @@ EXPORT void monitor_task(INT stacd, void *exinf)
             }
         }
 
-
         /* Send the oldest queued terrain event. */
         if (event_queue.count > 0) {
             UB next_events = 0;
@@ -225,7 +250,7 @@ EXPORT void monitor_task(INT stacd, void *exinf)
                     );
 
                     if (er == E_OK) {
-                        /* Remove the event only after a successful send. */
+                        /* Remove the event after a successful send. */
                         s4_event_queue_pop(&event_queue);
                     } else {
                         send_retries++;
@@ -271,12 +296,12 @@ EXPORT void monitor_task(INT stacd, void *exinf)
                     (INT)state.pitch_cdeg,
                     (INT)state.roll_cdeg
                 );
+
                 /* Show the estimated wheel-height difference. */
                 tm_printf(
                     (UB*)"[IMU] wheel_height_diff_mm=%d\n",
                     (INT)state.wheel_height_diff_mm
                 );
-
             } else {
                 tm_printf(
                     (UB*)"[IMU] No valid reading "
@@ -311,8 +336,8 @@ EXPORT void monitor_task(INT stacd, void *exinf)
             /* Show packet status. */
             tm_printf(
                 (UB*)"[IMU] send_retries=%u "
-                    "packet_errors=%u queued=%u "
-                    "overflows=%u\n",
+                     "packet_errors=%u queued=%u "
+                     "overflows=%u\n",
                 send_retries,
                 packet_errors,
                 event_queue.count,

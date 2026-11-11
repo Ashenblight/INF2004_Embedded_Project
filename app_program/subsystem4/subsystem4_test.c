@@ -1,7 +1,9 @@
+
 #include "subsystem4.h"
 #include "terrain_detection.h"
 #include "terrain_packet.h"
 #include "terrain_event_queue.h"
+#include "lift_detection.h"
 #include "../test_report.h"
 
 #if APP_TEST
@@ -14,6 +16,8 @@ EXPORT void subsystem4_test(void)
     T_RMBF rmbf;
     TERRAIN_DETECTOR detector = {0};
     S4_EVENT_QUEUE test_queue = {0};
+    lift_detection_t lift_detector = {0};
+    IMU_ACCEL_SAMPLE lift_sample = {0};
 
     UB first_event = 0;
     UB second_event = 0;
@@ -21,6 +25,9 @@ EXPORT void subsystem4_test(void)
     BOOL add2;
     BOOL read1;
     BOOL read2;
+
+    bool b_lift_detected = false;
+    bool b_first_change = false;
 
     UB packet[S4_PACKET_EVENT_SIZE] = {0};
     UW events = 0;
@@ -297,6 +304,111 @@ EXPORT void subsystem4_test(void)
         test_queue.overflows == 1,
         "detect FIFO queue overflow");
 
+    /* S4-U20: Stationary readings must not trigger a lift. */
+    lift_detection_reset(&lift_detector);
+
+    lift_sample.x_mg = 0;
+    lift_sample.y_mg = 0;
+    lift_sample.z_mg = 815;
+
+    (void)lift_detection_update(&lift_detector, &lift_sample);
+
+    b_lift_detected = lift_detection_update(
+        &lift_detector,
+        &lift_sample
+    );
+
+    TEST_CHECK("S4-U20",
+        (false == b_lift_detected) &&
+        (false == lift_detector.b_detected) &&
+        (0U == lift_detector.candidate_count),
+        "stationary readings do not trigger lift");
+
+    /* S4-U21: Ignore small acceleration changes. */
+    lift_detection_reset(&lift_detector);
+
+    lift_sample.x_mg = 0;
+    lift_sample.y_mg = 0;
+    lift_sample.z_mg = 815;
+
+    (void)lift_detection_update(&lift_detector, &lift_sample);
+
+    lift_sample.x_mg = 25;
+    lift_sample.y_mg = -15;
+    lift_sample.z_mg = 825;
+
+    (void)lift_detection_update(&lift_detector, &lift_sample);
+
+    lift_sample.x_mg = 40;
+    lift_sample.y_mg = -25;
+    lift_sample.z_mg = 835;
+
+    b_lift_detected = lift_detection_update(
+        &lift_detector,
+        &lift_sample
+    );
+
+    TEST_CHECK("S4-U21",
+        (false == b_lift_detected) &&
+        (false == lift_detector.b_detected) &&
+        (0U == lift_detector.candidate_count),
+        "ignore small acceleration changes");
+
+    /* S4-U22: Confirm two large acceleration changes. */
+    lift_detection_reset(&lift_detector);
+
+    lift_sample.x_mg = 0;
+    lift_sample.y_mg = 0;
+    lift_sample.z_mg = 815;
+
+    (void)lift_detection_update(&lift_detector, &lift_sample);
+
+    lift_sample.x_mg = 200;
+
+    b_first_change = lift_detection_update(
+        &lift_detector,
+        &lift_sample
+    );
+
+    lift_sample.x_mg = -20;
+
+    b_lift_detected = lift_detection_update(
+        &lift_detector,
+        &lift_sample
+    );
+
+    TEST_CHECK("S4-U22",
+        (false == b_first_change) &&
+        (true == b_lift_detected) &&
+        (true == lift_detector.b_detected) &&
+        (2U == lift_detector.candidate_count),
+        "detect repeated acceleration changes");
+
+    /* S4-U23: Keep the lift condition latched. */
+    b_lift_detected = lift_detection_update(
+        &lift_detector,
+        &lift_sample
+    );
+
+    TEST_CHECK("S4-U23",
+        (true == b_lift_detected) &&
+        (true == lift_detector.b_detected),
+        "lift detection remains latched");
+
+    /* S4-U24: Reset the lift detection state. */
+    lift_detection_reset(&lift_detector);
+
+    b_lift_detected = lift_detection_update(
+        &lift_detector,
+        &lift_sample
+    );
+
+    TEST_CHECK("S4-U24",
+        (false == b_lift_detected) &&
+        (false == lift_detector.b_detected) &&
+        (true == lift_detector.b_initialized) &&
+        (0U == lift_detector.candidate_count),
+        "reset clears lift detection");
 
     tk_dly_tsk(3500);
 
