@@ -257,10 +257,9 @@ bool barcode_decoder_in_progress(const barcode_decoder_t *d)
     return d != NULL && d->configured && d->have_sample && d->phase != SEEK;
 }
 
-static bool width_membership(const uint32_t *widths, uint8_t membership[9])
+static void sort_symbol_widths(const uint32_t *widths, uint32_t sorted[9])
 {
-    uint32_t sorted[9];
-    memcpy(sorted, widths, sizeof(sorted));
+    memcpy(sorted, widths, 9U * sizeof(*sorted));
     for (unsigned i = 1; i < 9; ++i)
     {
         const uint32_t value = sorted[i];
@@ -272,6 +271,12 @@ static bool width_membership(const uint32_t *widths, uint8_t membership[9])
         }
         sorted[j] = value;
     }
+}
+
+static bool width_membership(const uint32_t *widths, uint8_t membership[9])
+{
+    uint32_t sorted[9];
+    sort_symbol_widths(widths, sorted);
     const uint32_t narrow = (uint32_t)(((uint64_t)sorted[2] + sorted[3]) / 2U);
     const uint32_t wide = sorted[7];
     const uint64_t wide_total = (uint64_t)sorted[6] + sorted[7] + sorted[8];
@@ -301,23 +306,25 @@ static uint8_t pattern_score(const uint8_t membership[9], uint16_t pattern)
     return (uint8_t)(total / 9U);
 }
 
-barcode_guess_t barcode_guess_runs(const uint32_t *widths, unsigned count,
-                                  bool truncated, uint32_t allowed_letters)
+static barcode_guess_t guess_runs(const uint32_t *widths, unsigned count,
+                                  bool require_end, unsigned end_run_count,
+                                  uint32_t allowed_letters)
 {
     barcode_guess_t result = {.letter = BARCODE_NO_LETTER};
     uint8_t scores[26] = {0};
     uint32_t reversed_letters = 0, complete_letters = 0;
-    if (widths == NULL || count < 20U)
+    const unsigned minimum = require_end ? end_run_count : 20U;
+    if (widths == NULL || count < minimum)
         return result;
     if (allowed_letters == 0U)
         allowed_letters = (1UL << 26U) - 1U;
-    for (unsigned start = 0; start + 20U <= count; start += 2U)
+    for (unsigned start = 0; start <= count - minimum; start += 2U)
     {
         uint8_t start_membership[9], data_membership[9], end_membership[9];
         if (!width_membership(widths + start, start_membership) ||
             !width_membership(widths + start + 10U, data_membership))
             continue;
-        const bool have_end = start + 30U <= count &&
+        const bool have_end = count - start >= end_run_count &&
                               width_membership(widths + start + 20U, end_membership);
         for (unsigned reverse = 0; reverse < 2U; ++reverse)
         {
@@ -326,7 +333,7 @@ barcode_guess_t barcode_guess_runs(const uint32_t *widths, unsigned count,
             if (marker_score < 90U)
                 continue;
             const bool complete = have_end && pattern_score(end_membership, star) >= 90U;
-            if (truncated && !complete)
+            if (require_end && !complete)
                 continue;
             for (unsigned letter = 0; letter < 26U; ++letter)
             {
@@ -377,4 +384,72 @@ barcode_guess_t barcode_guess_runs(const uint32_t *widths, unsigned count,
     result.reversed = (reversed_letters & (1UL << result.letter)) != 0U;
     result.complete = (complete_letters & (1UL << result.letter)) != 0U;
     return result;
+}
+
+barcode_guess_t barcode_guess_runs(const uint32_t *widths, unsigned count,
+                                  bool truncated, uint32_t allowed_letters)
+{
+    /* The last run of a raw trace may end at a dump instead of an optical edge. */
+    return guess_runs(widths, count, truncated, BARCODE_FRAME_ELEMENTS + 1U, allowed_letters);
+}
+
+/* Buddy 3's reference groups the three widest elements in each symbol. The
+ * exact pattern can still be reliable when one wide stripe is stretched. */
+static bool ranked_symbol(const uint32_t *widths, uint16_t *pattern, uint32_t *narrow)
+{
+    uint32_t sorted[9];
+    sort_symbol_widths(widths, sorted);
+    if (sorted[0] == 0U ||
+        (uint64_t)sorted[6] * 2U < (uint64_t)sorted[5] * 3U ||
+        sorted[8] > (uint64_t)sorted[6] * 3U ||
+        sorted[5] > (uint64_t)sorted[0] * 3U)
+        return false;
+
+    *pattern = 0U;
+    for (unsigned i = 0; i < 9U; ++i)
+        *pattern = (uint16_t)((*pattern << 1U) | (widths[i] >= sorted[6]));
+    *narrow = (uint32_t)(((uint64_t)sorted[2] + sorted[3] + 1U) / 2U);
+    return true;
+}
+
+static bool ranked_gap_is_narrow(uint32_t gap, uint32_t left, uint32_t right)
+{
+    const uint32_t narrow = left > right ? left : right;
+    /* Two nominal 250 us sample periods of additional timing tolerance. */
+    return gap != 0U && gap <= (uint64_t)narrow * 3U + 500U;
+}
+
+barcode_guess_t barcode_guess_frame(const uint32_t widths[BARCODE_FRAME_ELEMENTS])
+{
+    const barcode_guess_t scored = guess_runs(widths, BARCODE_FRAME_ELEMENTS, true,
+                                               BARCODE_FRAME_ELEMENTS, 0U);
+    if (scored.accepted || widths == NULL)
+        return scored;
+
+    uint16_t start, payload, stop;
+    uint32_t start_narrow, payload_narrow, stop_narrow;
+    if (!ranked_symbol(widths, &start, &start_narrow) ||
+        !ranked_symbol(widths + 10U, &payload, &payload_narrow) ||
+        !ranked_symbol(widths + 20U, &stop, &stop_narrow) ||
+        !ranked_gap_is_narrow(widths[9], start_narrow, payload_narrow) ||
+        !ranked_gap_is_narrow(widths[19], payload_narrow, stop_narrow))
+        return scored;
+
+    const uint16_t reverse_star = reverse_pattern(STAR_PATTERN);
+    const bool reversed = start == reverse_star;
+    if ((start != STAR_PATTERN && !reversed) || stop != start)
+        return scored;
+
+    if (reversed)
+        payload = reverse_pattern(payload);
+    for (unsigned i = 0; i < 26U; ++i)
+    {
+        if (letters[i] == payload)
+        {
+            return (barcode_guess_t){.letter = (uint8_t)i, .accepted = true,
+                                     .reversed = reversed, .complete = true,
+                                     .ranked_widths = true};
+        }
+    }
+    return scored;
 }

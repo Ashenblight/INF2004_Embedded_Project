@@ -1,5 +1,5 @@
 /** Production RP2040 GPIO/timer capture. No simulated hardware in this file.
- * GPIO, timer, interrupt protection and live encoder access are kept together.
+ * GPIO, timer and interrupt protection are kept together.
  * Host tests link host_barcode_port.c
  * instead of this file; normal Pico builds always compile this implementation. */
 #include "barcode_port.h"
@@ -30,9 +30,9 @@ uint32_t barcode_port_now_us(void)
 {
     return REG32(TIMER_RAW_LOW);
 }
-bool barcode_port_sensor_black(void)
+bool barcode_port_sensor_high(void)
 {
-    return (gpio_get_val(BARCODE_GPIO_PIN) != 0U) == (BARCODE_BLACK_HIGH != 0U);
+    return gpio_get_val(BARCODE_GPIO_PIN) != 0U;
 }
 static void arm_next(void)
 {
@@ -55,6 +55,9 @@ ER barcode_port_timer_start(FP handler)
     result = gpio_set_pin(BARCODE_GPIO_PIN, GPIO_MODE_IN);
     if (result != E_OK)
         return result;
+    /* Match Buddy 3's input bias for an open-collector DO output. */
+    clr_w(GPIO(BARCODE_GPIO_PIN), GPIO_PDE);
+    set_w(GPIO(BARCODE_GPIO_PIN), GPIO_PUE);
     definition.intatr = TA_HLNG;
     definition.inthdr = handler;
     result = tk_def_int(BARCODE_TIMER_ALARM, &definition);
@@ -97,26 +100,4 @@ UW barcode_port_enter_critical(void)
 void barcode_port_leave_critical(UW saved)
 {
     EI(saved);
-}
-
-/* Motion Control is optional in the standalone project template. */
-extern void motion_get_odometry(int32_t *left_ticks, int32_t *right_ticks)
-    __attribute__((weak));
-
-ER barcode_port_read_encoder(barcode_encoder_snapshot_t *snapshot)
-{
-    if (snapshot == NULL)
-        return E_PAR;
-    if (motion_get_odometry == NULL)
-        return E_NOEXS;
-
-    int32_t left_ticks, right_ticks;
-    const uint32_t sampled_at_us = barcode_port_now_us();
-    motion_get_odometry(&left_ticks, &right_ticks);
-
-    /* Widen before adding. Both wheel counts use the same travel direction. */
-    snapshot->position_ticks = (uint32_t)(((int64_t)left_ticks + right_ticks) / 2);
-    snapshot->reset_epoch = 0U; /* Buddy 2's API requires no reset during a run. */
-    snapshot->sampled_at_us = sampled_at_us;
-    return E_OK;
 }

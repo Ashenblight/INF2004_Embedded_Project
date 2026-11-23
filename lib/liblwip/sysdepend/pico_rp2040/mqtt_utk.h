@@ -7,13 +7,11 @@
 #define MQTT_UTK_H
 
 /*
- * Call once, from cyw43_utk_task() the first time the link reaches
- * CYW43_LINK_UP (see cyw43_utk.c). Starts the MQTT connection to
- * MQTT_BROKER_IP:MQTT_BROKER_PORT (config/wifi_secrets.h) and, once
- * connected, a periodic heartbeat publish on MQTT_TOPIC. Safe to call more
- * than once -- a second call while already connecting/connected is a no-op.
+ * Call from cyw43_utk_task() while the Wi-Fi link is up. Connects to the
+ * configured broker, retries failures, and publishes live telemetry while
+ * connected. The network task owns the lwIP client and all publishes.
  */
-void mqtt_utk_start(void);
+void mqtt_utk_poll(void);
 /* Register during application init. Handler runs on the existing network-owner
  * task after complete binary payload assembly. Return 0 on acceptance, 1 to
  * retry a temporarily busy application, or a negative value to reject. */

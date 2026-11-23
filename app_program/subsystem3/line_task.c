@@ -280,7 +280,7 @@ ER line_task_start(void)
     return E_OK;
 }
 
-ER line_task_get_latest(line_task_status_t *status)
+ER line_task_get_latest_tmo(line_task_status_t *status, TMO lock_timeout)
 {
     ER result;
     SYSTIM now;
@@ -293,7 +293,7 @@ ER line_task_get_latest(line_task_status_t *status)
     {
         return E_OBJ;
     }
-    result = tk_loc_mtx(m_line_mutex_id, TMO_POL);
+    result = tk_loc_mtx(m_line_mutex_id, lock_timeout);
     if (result < E_OK)
     {
         return result;
@@ -309,6 +309,11 @@ ER line_task_get_latest(line_task_status_t *status)
         }
     }
     return result;
+}
+
+ER line_task_get_latest(line_task_status_t *status)
+{
+    return line_task_get_latest_tmo(status, TMO_POL);
 }
 
 ER line_task_set_following_enabled(bool enabled)

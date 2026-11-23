@@ -5,32 +5,14 @@
 #define LINE_TASK_H
 
 #include "../app.h"
+#include "../../config/sensor_calibration.h"
 #define LINE_LEFT_GPIO_PIN          (0U)
 #define LINE_CENTRE_GPIO_PIN        (2U)
-
-/* PROVISIONAL: independently confirm each sensor on black and white. */
-#ifndef LINE_LEFT_BLACK_HIGH
-#define LINE_LEFT_BLACK_HIGH        (1U)
-#endif
-#ifndef LINE_CENTRE_BLACK_HIGH
-#define LINE_CENTRE_BLACK_HIGH      (1U)
-#endif
-
-/* Starting correction magnitude. Tune on the track with Motion Control. */
-#ifndef LINE_STEERING_CORRECTION
-#define LINE_STEERING_CORRECTION    (20)
-#endif
-#if ((LINE_STEERING_CORRECTION < 1) || (LINE_STEERING_CORRECTION > 127))
-#error "Steering correction magnitude must fit the signed Motion Control input."
-#endif
 
 #define LINE_SAMPLE_PERIOD_MS       (10U)
 #define LINE_LOG_PERIOD_MS          (250U)
 #define LINE_STATUS_MAX_AGE_MS      (3U * LINE_SAMPLE_PERIOD_MS)
 
-#if ((LINE_LEFT_BLACK_HIGH > 1U) || (LINE_CENTRE_BLACK_HIGH > 1U))
-#error "Sensor polarity must be 0 (black is LOW) or 1 (black is HIGH)."
-#endif
 #if (LINE_LEFT_GPIO_PIN == LINE_CENTRE_GPIO_PIN)
 #error "The two line sensors must use different GPIO pins."
 #endif
@@ -164,6 +146,10 @@ ER line_task_start(void);
  *       original 32-bit ranges and rollover behavior.
  */
 ER line_task_get_latest(line_task_status_t *status);
+
+/* Allow a task to wait for the snapshot mutex for up to lock_timeout ms.
+ * The age check still applies once the snapshot is available. */
+ER line_task_get_latest_tmo(line_task_status_t *status, TMO lock_timeout);
 
 /**
  * @brief Vehicle Controller changes permission to use line steering.

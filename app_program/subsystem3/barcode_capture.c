@@ -1,14 +1,13 @@
-/** Hardware acquisition: pair GP4 with CURRENT encoder distance in a short
- * timer ISR. The core-0 worker owns decoding; the ISR never locks or prints. */
+/** Sample the digital reflectance signal and queue completed optical runs. */
 #include "barcode_capture.h"
 #include "barcode_shared.h"
 #include "barcode_config.h"
-static barcode_observation_t ring[BARCODE_CAPTURE_RING_SIZE];
+static barcode_optical_run_t ring[BARCODE_CAPTURE_RING_SIZE];
 static volatile uint8_t head, tail;
-static volatile uint32_t faults, last_motion;
-static uint32_t active_generation, blocked_generation, previous_epoch, previous_position,
-    last_capture;
-static bool have_previous, previous_black, started;
+static volatile uint32_t faults;
+static uint32_t input_edges;
+static uint32_t last_capture, run_started_us;
+static bool have_previous, previous_black, run_has_start_edge, started;
 static ID worker_id;
 static barcode_raw_trace_t raw_trace;
 static bool raw_ready, raw_black;
@@ -21,16 +20,28 @@ static void wake_worker(void)
     if (worker_id > 0)
         (void)tk_wup_tsk(worker_id);
 }
-static void record_raw(bool black, uint32_t now)
+static void reset_raw_trace(void)
+{
+    raw_trace.count = 0U;
+    raw_trace.bits[0] = '\0';
+    raw_trace.truncated = false;
+    raw_trace.high_samples = raw_trace.low_samples = 0U;
+}
+
+static void record_raw(bool black, bool high, uint32_t now)
 {
     if (raw_ready || raw_trace.truncated)
         return;
+    if (high)
+        ++raw_trace.high_samples;
+    else
+        ++raw_trace.low_samples;
     if (raw_trace.count == 0U)
     {
         if (!black)
             return;
         raw_trace.count = 1U;
-        raw_trace.bits[0] = BARCODE_BLACK_HIGH ? '1' : '0';
+        raw_trace.bits[0] = '1';
         raw_trace.bits[1] = '\0';
         raw_run_started_us = now;
         raw_black = black;
@@ -44,27 +55,23 @@ static void record_raw(bool black, uint32_t now)
             raw_trace.truncated = true;
             return;
         }
-        raw_trace.bits[raw_trace.count++] =
-            (black == (BARCODE_BLACK_HIGH != 0U)) ? '1' : '0';
+        raw_trace.bits[raw_trace.count++] = black ? '1' : '0';
         raw_trace.bits[raw_trace.count] = '\0';
         raw_run_started_us = now;
         raw_black = black;
     }
 }
-static void fault(uint32_t mask, uint32_t generation)
+/* Runs on the capture core. Clear any queued part of the interrupted frame. */
+static void fault(uint32_t mask)
 {
     faults |= mask;
-    blocked_generation = generation;
+    tail = head;
+    have_previous = false;
+    run_has_start_edge = false;
     wake_worker();
 }
 static void timer_handler(UINT intno)
 {
-    barcode_encoder_snapshot_t encoder;
-    barcode_observation_t sample;
-    uint32_t generation, now;
-    uint8_t next;
-    bool black;
-    ER result;
     (void)intno;
     barcode_port_timer_ack_rearm();
     const uint32_t dump_request = __atomic_load_n(&raw_dump_requested, __ATOMIC_ACQUIRE);
@@ -81,72 +88,47 @@ static void timer_handler(UINT intno)
     const uint32_t reset_request = __atomic_load_n(&raw_reset_requested, __ATOMIC_ACQUIRE);
     if (!raw_ready && reset_request != raw_reset_seen)
     {
-        raw_trace.count = 0U;
-        raw_trace.bits[0] = '\0';
-        raw_trace.truncated = false;
+        reset_raw_trace();
         raw_reset_seen = reset_request;
     }
-    /* Keep the raw optical trace running even after the decoder inhibits scanning. */
-    black = barcode_port_sensor_black();
-    record_raw(black, barcode_port_now_us());
-    generation = barcode_shared_capture_generation();
-    if (generation == 0U)
+    const bool high = barcode_port_sensor_high();
+    const bool sensor_black = high == (BARCODE_BLACK_HIGH != 0U);
+    const uint32_t now = barcode_port_now_us();
+    record_raw(sensor_black, high, now);
+    const bool edge = have_previous && sensor_black != previous_black;
+    if (edge)
     {
-        have_previous = false;
-        active_generation = 0U;
-        return;
+        const uint32_t edges = __atomic_load_n(&input_edges, __ATOMIC_RELAXED);
+        __atomic_store_n(&input_edges, edges + 1U, __ATOMIC_RELAXED);
     }
-    if (generation == blocked_generation)
-        return;
-    if (generation != active_generation)
-    {
-        have_previous = false;
-        active_generation = generation;
-    }
-    now = barcode_port_now_us();
     if (have_previous && now - last_capture > BARCODE_CAPTURE_MAX_GAP_US)
-    {
-        fault(BARCODE_FAULT_CAPTURE, generation);
-        return;
-    }
-    result = barcode_port_read_encoder(&encoder);
-    now = barcode_port_now_us();
-    if (result != E_OK || now - encoder.sampled_at_us > BARCODE_ENCODER_MAX_AGE_US)
-    {
-        fault(BARCODE_FAULT_ENCODER, generation);
-        return;
-    }
-    if (generation != barcode_shared_capture_generation())
-        return;
-    if (have_previous && encoder.reset_epoch != previous_epoch)
-    {
-        fault(BARCODE_FAULT_ENCODER, generation);
-        return;
-    }
+        fault(BARCODE_FAULT_CAPTURE);
     last_capture = now;
-    if (!have_previous || encoder.position_ticks != previous_position)
-        last_motion = now;
-    if (have_previous && encoder.position_ticks == previous_position && black == previous_black)
-        return;
-    sample.position = encoder.position_ticks;
-    sample.generation = generation;
-    sample.captured_us = now;
-    sample.flags = (uint8_t)((black ? BARCODE_OBSERVATION_BLACK : 0U) |
-                             (!have_previous ? BARCODE_OBSERVATION_RESTART : 0U));
-    previous_position = encoder.position_ticks;
-    previous_epoch = encoder.reset_epoch;
-    previous_black = black;
-    have_previous = true;
-    next = (uint8_t)((head + 1U) & (BARCODE_CAPTURE_RING_SIZE - 1U));
-    if (next == tail)
+    if (!have_previous)
     {
-        fault(BARCODE_FAULT_OVERFLOW, generation);
+        previous_black = sensor_black;
+        have_previous = true;
         return;
     }
-    ring[head] = sample;
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    head = next;
-    wake_worker();
+    if (!edge)
+        return;
+
+    if (run_has_start_edge)
+    {
+        const uint8_t next = (uint8_t)((head + 1U) & (BARCODE_CAPTURE_RING_SIZE - 1U));
+        if (next == tail)
+        {
+            fault(BARCODE_FAULT_OVERFLOW);
+            return;
+        }
+        ring[head] = (barcode_optical_run_t){run_started_us, now - run_started_us, previous_black};
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        head = next;
+        wake_worker();
+    }
+    previous_black = sensor_black;
+    run_started_us = now;
+    run_has_start_edge = true;
 }
 ER barcode_capture_start(ID worker)
 {
@@ -159,10 +141,9 @@ ER barcode_capture_start(ID worker)
         return E_CTX;
     head = tail = 0U;
     faults = 0U;
-    last_motion = 0U;
-    active_generation = blocked_generation = 0U;
-    have_previous = false;
-    raw_trace = (barcode_raw_trace_t){0};
+    __atomic_store_n(&input_edges, 0U, __ATOMIC_RELAXED);
+    have_previous = run_has_start_edge = false;
+    reset_raw_trace();
     raw_ready = false;
     raw_reset_requested = raw_dump_requested = 0U;
     raw_reset_seen = raw_dump_seen = 0U;
@@ -172,6 +153,12 @@ ER barcode_capture_start(ID worker)
         started = true;
     return result;
 }
+
+uint32_t barcode_capture_input_edges(void)
+{
+    return __atomic_load_n(&input_edges, __ATOMIC_RELAXED);
+}
+
 void barcode_capture_stop(void)
 {
     if (started && tk_get_prc() == 1)
@@ -180,7 +167,7 @@ void barcode_capture_stop(void)
         started = false;
     }
 }
-ER barcode_capture_pop(barcode_observation_t *sample)
+ER barcode_capture_pop(barcode_optical_run_t *sample)
 {
     UW saved;
     if (sample == NULL)
@@ -190,6 +177,11 @@ ER barcode_capture_pop(barcode_observation_t *sample)
     if (tk_get_prc() != 1)
         return E_CTX;
     saved = barcode_port_enter_critical();
+    if (faults != 0U)
+    {
+        barcode_port_leave_critical(saved);
+        return E_IO;
+    }
     if (head == tail)
     {
         barcode_port_leave_critical(saved);
@@ -213,16 +205,6 @@ uint32_t barcode_capture_take_faults(void)
     barcode_port_leave_critical(saved);
     return value;
 }
-uint32_t barcode_capture_last_motion_us(void)
-{
-    UW saved;
-    uint32_t value;
-    saved = barcode_port_enter_critical();
-    value = last_motion;
-    barcode_port_leave_critical(saved);
-    return value;
-}
-
 void barcode_capture_reset_raw_trace(void)
 {
     const uint32_t request = __atomic_load_n(&raw_reset_requested, __ATOMIC_RELAXED);
@@ -247,9 +229,7 @@ bool barcode_capture_take_raw_trace(barcode_raw_trace_t *trace)
         return false;
     }
     *trace = raw_trace;
-    raw_trace.count = 0U;
-    raw_trace.bits[0] = '\0';
-    raw_trace.truncated = false;
+    reset_raw_trace();
     raw_ready = false;
     barcode_port_leave_critical(saved);
     return true;

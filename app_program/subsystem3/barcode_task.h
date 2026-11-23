@@ -9,15 +9,11 @@ typedef struct
     UW samples, rejected, decoded, input_drops, output_drops, restarts;
     UW cancelled;
 } barcode_task_status_t;
-typedef struct
-{
-    barcode_guess_t guess;
-    barcode_movement_t movement;
-    uint16_t mapping_revision;
-    uint32_t request_id;
-} barcode_junction_result_t;
 ER barcode_task_init(void);
 ER barcode_task_start(void);
+ER barcode_task_get_status(barcode_task_status_t *status);
+
+#if APP_TEST
 /* Init phase, BEFORE start: bind the CONTROLLER-OWNED MBF_NAV_EVENTS and
  * FLG_CONTROLLER. Its maximum message length must be at least 16 bytes.
  * event/fault bits are team assumptions supplied by the caller, not hard-coded.
@@ -25,12 +21,7 @@ ER barcode_task_start(void);
  */
 ER barcode_task_bind_controller(ID event_buffer, ID controller_flag, UINT event_bit,
                                 UINT fault_bit);
-/* Controller task only. Start disabled; a configured movement map is required.
- * Normal builds require a working current encoder snapshot getter and ready
- * capture hardware. E_TMOUT before the worker starts capture: retry later in
- * the normal controller loop; do not busy-wait in the high-priority initial task.
- * Disabling invalidates queued/captured data by changing the run generation.
- */
+/* Simulated input stays gated by the test map and test generation. */
 ER barcode_task_set_enabled(bool enabled);
 ER barcode_task_clear_faults(void);
 ER barcode_task_control_status(barcode_control_status_t *status);
@@ -48,15 +39,18 @@ ER barcode_task_submit_sample(bool black, uint32_t encoder_position, bool restar
  * A fault record returns E_SYS; inspect persistent control fault bits.
  */
 ER barcode_task_receive_result(barcode_message_t *message, TMO timeout);
-ER barcode_task_get_status(barcode_task_status_t *status);
-/* Diagnostic capture starts fresh on GP20 Start and prints once at a junction.
- * Single controller-task producer on either core; the worker performs the print. */
+void barcode_selftest(void);
+#else
+/* Current electrical level and cumulative observed transitions, including while parked. */
+ER barcode_task_get_input(bool *high, uint32_t *edges);
+/* Marker for the start of a controller approach. The optical worker is always on. */
+uint32_t barcode_task_scan_mark(void);
+/* Consume one fresh scan that started at or after the approach marker. */
+ER barcode_task_take_scan(uint32_t after_us, barcode_character_t *character);
+/* Only the diagnostic trace is reset or dumped by these calls. */
 void barcode_task_reset_raw_trace(void);
 void barcode_task_request_raw_dump(void);
-/* Consume the result of the current junction request once. E_TMOUT while
- * pending. A new GP20 Start cancels any previous request/result. */
-ER barcode_task_receive_junction_result(barcode_junction_result_t *result);
-#if APP_TEST
-void barcode_selftest(void);
 #endif
+/* Latest completed optical scan. 0 pending, 1–26 A–Z. */
+uint8_t barcode_task_get_telemetry_letter(void);
 #endif

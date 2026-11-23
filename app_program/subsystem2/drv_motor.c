@@ -4,7 +4,7 @@
  *  COPYRIGHT NOTICE: (c) 2026 INF2004 SE05 Subsystem 2. All rights reserved.
  */
 
-#include <stdint.h>
+#include <stdatomic.h>
 #include "drv_motor.h"
 
 /* RP2040 Hardware Register Base Addresses */
@@ -22,6 +22,9 @@
 
 #define RESET_BIT_PWM          (1UL << 14U)
 #define GPIO_FUNC_PWM          (4UL)
+/* RP2040 IO_BANK0 CTRL overrides the PWM output value and pad enable. */
+#define GPIO_OUTOVER_LOW       (2UL << 8U)
+#define GPIO_OEOVER_ENABLE     (3UL << 12U)
 #define PIN_M1_IN1             (8U)
 #define PIN_M1_IN2             (9U)
 #define PIN_M2_IN1             (10U)
@@ -43,6 +46,8 @@
 #define REG_PWM_CH5_CC  (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x70UL))
 #define REG_PWM_CH5_TOP (*(volatile uint32_t *)(RP2040_PWM_BASE + 0x74UL))
 
+static atomic_bool g_motor_stop_latched;
+
 /* Private function prototypes (BARR-C Rule 4.3.b). */
 static inline void reg_gpio_ctrl_write (uint32_t pin, uint32_t val);
 static uint32_t    channel_cc_compute (int16_t pwm_cmd);
@@ -56,6 +61,11 @@ static uint32_t    channel_cc_compute (int16_t pwm_cmd);
  */
 void drv_motor_init (void)
 {
+    if (drv_motor_stop_latched())
+    {
+        return;
+    }
+
     /* Step 1: Release the PWM peripheral from the RP2040 reset controller. */
     REG_RESETS_RESET_CLR = RESET_BIT_PWM;
 
@@ -101,6 +111,25 @@ void drv_motor_brake (void)
     REG_PWM_CH5_CC   = 0UL;
 }
 
+void drv_motor_latch_stop (void)
+{
+    atomic_store_explicit(&g_motor_stop_latched, true, memory_order_release);
+
+    /* Both inputs LOW brakes each Robo Pico motor. The pad override
+     * keeps that state even if another core is writing PWM compares. */
+    const uint32_t brake_pads =
+        GPIO_FUNC_PWM | GPIO_OUTOVER_LOW | GPIO_OEOVER_ENABLE;
+    reg_gpio_ctrl_write(PIN_M1_IN1, brake_pads);
+    reg_gpio_ctrl_write(PIN_M1_IN2, brake_pads);
+    reg_gpio_ctrl_write(PIN_M2_IN1, brake_pads);
+    reg_gpio_ctrl_write(PIN_M2_IN2, brake_pads);
+}
+
+bool drv_motor_stop_latched (void)
+{
+    return atomic_load_explicit(&g_motor_stop_latched, memory_order_acquire);
+}
+
 /**
  * @brief Place H-bridge outputs into high-Z coasting mode.
  */
@@ -120,6 +149,11 @@ void drv_motor_coast (void)
  */
 void drv_motor_set_speed (int16_t left_pwm, int16_t right_pwm)
 {
+    if (drv_motor_stop_latched())
+    {
+        return;
+    }
+
     /* Ensure slices are enabled. */
     REG_PWM_CH4_CSR |= PWM_CSR_EN_BIT;
     REG_PWM_CH5_CSR |= PWM_CSR_EN_BIT;
@@ -142,9 +176,9 @@ void drv_motor_set_speed (int16_t left_pwm, int16_t right_pwm)
  */
 static inline void reg_gpio_ctrl_write (uint32_t pin, uint32_t val)
 {
-    uint32_t const addr = (RP2040_IO_BANK0_BASE + IO_CTRL_OFFSET) +
-                          (pin * IO_CTRL_STRIDE);
-    /* Cast converts calculated 32-bit hardware register address to MMIO ptr. */
+    uintptr_t const addr = RP2040_IO_BANK0_BASE + IO_CTRL_OFFSET +
+                           (pin * IO_CTRL_STRIDE);
+    /* The calculated address identifies a 32-bit IO_BANK0 register. */
     volatile uint32_t * const p_reg = (volatile uint32_t *)addr;
 
     *p_reg = val;

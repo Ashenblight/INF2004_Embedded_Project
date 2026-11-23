@@ -235,6 +235,10 @@ ER motion_stop (void);
  */
 void motion_emergency_stop (void);
 
+/* End the current run regardless of queued commands or normal stop clears. */
+void motion_latch_run_stop (void);
+bool motion_run_stop_latched (void);
+
 /**
  * @brief Release emergency stop interlock to allow subsequent commands.
  */

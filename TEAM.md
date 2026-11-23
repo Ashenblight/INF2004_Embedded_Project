@@ -73,7 +73,7 @@ fixed.
 | GP22 | | |
 | GP26 | | (ADC0 capable) |
 | GP27 | | (ADC1 capable) |
-| GP28 | | (ADC2 capable) |
+| GP28 | S3 | Barcode digital `DO` on Grove 7 |
 
 ## 3. Peripherals
 

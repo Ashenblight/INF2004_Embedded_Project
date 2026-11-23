@@ -4,9 +4,8 @@
  *
  *	Runs entirely on the single processor-1-owned task that already owns
  *	the CYW43439 and the rest of lwIP (docs/RELEASE.md safety rule 6):
- *	cyw43_utk_task() (cyw43_utk.c) calls mqtt_utk_start() once, the first
- *	time it observes CYW43_LINK_UP. mqtt.c's own keepalive/ping/retry
- *	timers, and the heartbeat below, both ride the same sys_check_timeouts()
+ *	cyw43_utk_task() (cyw43_utk.c) polls this module while the link is up.
+ *	mqtt.c's keepalive timers and the heartbeat use sys_check_timeouts()
  *	polling that task already does for DHCP and TCP -- nothing extra runs
  *	on any other task or core.
  *
@@ -17,16 +16,20 @@
 
 #include "lwip/apps/mqtt.h"
 #include "lwip/ip_addr.h"
+#include "lwip/sys.h"
 #include "lwip/timeouts.h"
 #include "wifi_secrets.h"
 #include "mqtt_utk.h"
+#include "../../../../app_program/subsystem1/robot_telemetry.h"
 #include "../../../../app_program/subsystem3/barcode_config.h"
 #include <string.h>
 #include <tm/tmonitor.h>
 
 #define MQTT_UTK_HEARTBEAT_MS   5000
 #define MQTT_UTK_KEEPALIVE_S    60
-#define MQTT_UTK_RETRY_MS       3000
+#define MQTT_UTK_RETRY_MS       3000U
+#define MQTT_UTK_TELEMETRY_MS   100U
+#define MQTT_UTK_TELEMETRY_TOPIC MQTT_CLIENT_ID "/telemetry/bench"
 
 /* Inbound message staging. A publish arrives as one topic callback followed by
  * one or more data callbacks, so the topic has to be kept until the fragment
@@ -39,6 +42,11 @@
 static mqtt_client_t	*client;
 static ip_addr_t	broker_addr;
 static u8_t		connecting;
+static u8_t retry_pending;
+static u32_t last_failure_ms;
+#if !APP_TEST
+static u32_t last_telemetry_ms;
+#endif
 
 static char		rx_topic[MQTT_UTK_RX_TOPIC_MAX];
 static UB		rx_data[MQTT_UTK_RX_DATA_MAX];
@@ -178,11 +186,11 @@ static void heartbeat_timeout(void *arg)
 	sys_timeout(MQTT_UTK_HEARTBEAT_MS, heartbeat_timeout, NULL);
 }
 
-static void retry_timeout(void *arg)
+static void defer_connection_retry(void)
 {
-	(void)arg;
-	connecting = 0;
-	mqtt_utk_start();
+    last_failure_ms = sys_now();
+    retry_pending = 1U;
+    connecting = 0U;
 }
 
 static void connection_cb(mqtt_client_t *c, void *arg, mqtt_connection_status_t status)
@@ -193,10 +201,7 @@ static void connection_cb(mqtt_client_t *c, void *arg, mqtt_connection_status_t 
 	if(status == MQTT_CONNECT_ACCEPTED) {
 		err_t	err;
 
-		/* No longer *connecting* -- clear the guard so that if this
-		 * connection later drops, the poll loop's mqtt_utk_start() call
-		 * is allowed to reconnect. Leaving it set would wedge the client
-		 * permanently after the first disconnect. */
+		/* A later network failure can schedule another attempt. */
 		connecting = 0;
 
 		tm_printf((UB*)"mqtt: connected to " MQTT_BROKER_IP "\n");
@@ -227,36 +232,29 @@ static void connection_cb(mqtt_client_t *c, void *arg, mqtt_connection_status_t 
 		sys_untimeout(heartbeat_timeout, NULL);
 		sys_timeout(MQTT_UTK_HEARTBEAT_MS, heartbeat_timeout, NULL);
 	} else {
-		/* mqtt_client_connect() reconnects on its own for a dropped
-		 * keepalive; a rejected/never-established connection does not
-		 * retry itself, so do that here -- on a delay, so a broker
-		 * that keeps rejecting (e.g. bad client ID) can't turn this
-		 * into a tight reconnect loop. */
 		tm_printf((UB*)"mqtt: connection status %d, retrying in %ds\n",
-			  (int)status, MQTT_UTK_RETRY_MS / 1000);
-		sys_timeout(MQTT_UTK_RETRY_MS, retry_timeout, NULL);
+			  (int)status, (int)(MQTT_UTK_RETRY_MS / 1000U));
+        defer_connection_retry();
 	}
 }
 
-void mqtt_utk_start(void)
+static void mqtt_utk_connect(void)
 {
 	struct mqtt_connect_client_info_t	client_info = {0};
 	err_t					err;
-
-	if(connecting || (client != NULL && mqtt_client_is_connected(client))) {
-		return;
-	}
 
 	if(client == NULL) {
 		client = mqtt_client_new();
 		if(client == NULL) {
 			tm_printf((UB*)"mqtt: mqtt_client_new() failed\n");
+            defer_connection_retry();
 			return;
 		}
 	}
 
 	if(!ip4addr_aton(MQTT_BROKER_IP, ip_2_ip4(&broker_addr))) {
 		tm_printf((UB*)"mqtt: bad MQTT_BROKER_IP\n");
+        defer_connection_retry();
 		return;
 	}
 	IP_SET_TYPE(&broker_addr, IPADDR_TYPE_V4);
@@ -269,6 +267,36 @@ void mqtt_utk_start(void)
 				  connection_cb, NULL, &client_info);
 	if(err != ERR_OK) {
 		tm_printf((UB*)"mqtt: mqtt_client_connect() failed, err=%d\n", (int)err);
-		connecting = 0;
+        defer_connection_retry();
 	}
+}
+
+void mqtt_utk_poll(void)
+{
+    const u32_t now_ms = sys_now();
+    if ((NULL == client) || !mqtt_client_is_connected(client))
+    {
+        if ((!connecting) && ((!retry_pending) ||
+            (MQTT_UTK_RETRY_MS <= (u32_t)(now_ms - last_failure_ms))))
+        {
+            retry_pending = 0U;
+            mqtt_utk_connect();
+        }
+        return;
+    }
+
+#if !APP_TEST
+    if (MQTT_UTK_TELEMETRY_MS <= (u32_t)(now_ms - last_telemetry_ms))
+    {
+        uint8_t packet[ROBOT_TELEMETRY_SIZE];
+        last_telemetry_ms = now_ms;
+        if (robot_telemetry_encode(packet, now_ms))
+        {
+            /* Live QoS 0 snapshots can expire while TCP is busy. The next
+             * poll interval will publish a current sample. */
+            (void)mqtt_publish(client, MQTT_UTK_TELEMETRY_TOPIC,
+                               packet, sizeof(packet), 0U, 0U, NULL, NULL);
+        }
+    }
+#endif
 }
