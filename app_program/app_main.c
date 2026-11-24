@@ -185,7 +185,7 @@ EXPORT INT usermain(void)
         {
             barcode_level = high ? "HIGH" : "LOW";
         }
-        tm_printf((UB *)"[HEARTBEAT] Pico alive (#%u) direction=%s barcode_do=%s barcode_edges=%u\n",
+        tm_printf((UB *)"[HEARTBEAT] Pico alive (#%u) direction=%s barcode_ao=%s barcode_edges=%u\n",
                   ++count, direction, barcode_level, (UINT)edges);
 #else
         tm_printf((UB *)"[HEARTBEAT] Pico alive (#%u) direction=%s\n", ++count, direction);

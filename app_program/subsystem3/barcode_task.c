@@ -1,19 +1,20 @@
-/** Decode optical frames and publish the latest scan for telemetry and navigation. */
+/** Decode AO + encoder observations and publish the latest scan for navigation. */
 #include "subsystem3.h"
 #include "barcode_task.h"
 #include "barcode_capture.h"
 #include "barcode_config.h"
+#include "barcode_shared.h"
 #define INPUT_BYTES 13U
 static ID status_mutex, worker_id;
 static bool initialized, started;
 static barcode_task_status_t statistics;
 static uint8_t last_scan_letter;
+static barcode_decoder_t decoder;
 
 #if APP_TEST
 static ID input_buffer, result_buffer, destination, controller_flag;
 static UINT controller_event_bit, controller_fault_bit;
 static bool producer_gap;
-static barcode_decoder_t decoder;
 static barcode_decoder_t diagnostic_decoder;
 typedef struct
 {
@@ -43,8 +44,29 @@ static void count(UW *field)
 }
 
 #if !APP_TEST
-#define BARCODE_ATTEMPT_IDLE_US 1000000U
-static UB trace_text[1024]; /* Used only by the barcode worker. */
+/* A high bit with no A-Z bits means "no usable map": fail closed. */
+#define BARCODE_NO_MAPPED_CANDIDATES (1UL << 31U)
+static uint32_t active_letter_mask(void)
+{
+    barcode_mapping_entry_t map[4];
+    uint16_t revision;
+    uint32_t mask = 0U;
+
+    if (barcode_mapping_copy(map, &revision) != E_OK)
+        return BARCODE_NO_MAPPED_CANDIDATES;
+
+    for (unsigned i = 0U; i < 4U; ++i)
+    {
+        if (map[i].letter < 26U && map[i].movement != BARCODE_MOVE_NONE)
+            mask |= 1UL << map[i].letter;
+    }
+    return mask != 0U ? mask : BARCODE_NO_MAPPED_CANDIDATES;
+}
+#endif
+
+#if !APP_TEST
+static UB trace_text[1024];
+static uint32_t frame_started_us;
 
 static void print_trace_widths(INT length, const uint32_t *widths, unsigned count)
 {
@@ -56,134 +78,226 @@ static void print_trace_widths(INT length, const uint32_t *widths, unsigned coun
     tm_printf((UB *)"%s", trace_text);
 }
 
-static void print_raw_scan(void)
+/* Print an algorithm result even when no complete barcode was published.
+ * A partial score is a diagnostic hint, NOT an authorised navigation result. */
+static void print_confidence(const char *source, const char *state,
+                             const barcode_guess_t *guess, unsigned runs)
 {
-    /* Keep the trace off the worker stack. */
-    static barcode_raw_trace_t trace;
-    if (!barcode_capture_take_raw_trace(&trace))
-        return;
-    const INT length = tm_sprintf(trace_text,
-                            (UB *)"[S3 BARCODE RAW] runs=%u truncated=%u high_samples=%u low_samples=%u bars=%s widths_us=",
-                            (UINT)trace.count, (UINT)trace.truncated, (UINT)trace.high_samples, (UINT)trace.low_samples,
-                            trace.count == 0U ? "none" : trace.bits);
-    print_trace_widths(length, trace.widths_us, trace.count);
+    if (guess->letter < 26U)
+    {
+        tm_printf((UB *)"[S3 BARCODE CONFIDENCE] source=%s state=%s best=%c score=%u margin=%u complete=%u match=%u runs=%u\n",
+                  source, state, (INT)('A' + guess->letter),
+                  (UINT)guess->score, (UINT)guess->margin,
+                  (UINT)guess->complete, (UINT)guess->accepted, (UINT)runs);
+    }
+    else
+    {
+        tm_printf((UB *)"[S3 BARCODE CONFIDENCE] source=%s state=%s best=? score=N/A margin=N/A complete=0 match=0 runs=%u\n",
+                  source, state, (UINT)runs);
+    }
 }
 
-static void publish_scan(barcode_guess_t guess, uint32_t started_us, uint32_t completed_us)
+static void print_raw_scan(void)
+{
+    static barcode_raw_trace_t trace;
+    static uint32_t encoder_widths[BARCODE_FRAME_ELEMENTS];
+    barcode_guess_t optical_guess, encoder_guess;
+    unsigned encoder_count;
+    const char *encoder_state;
+
+    if (!barcode_capture_take_raw_trace(&trace))
+        return;
+
+    const INT length = tm_sprintf(trace_text,
+        (UB *)"[S3 BARCODE RAW AO] runs=%u truncated=%u high_samples=%u low_samples=%u bars=%s widths_us=",
+        (UINT)trace.count, (UINT)trace.truncated, (UINT)trace.high_samples,
+        (UINT)trace.low_samples, trace.count == 0U ? "none" : trace.bits);
+    print_trace_widths(length, trace.widths_us, trace.count);
+
+    /* Original Buddy 3 confidence matcher, applied to the AO diagnostic trace.
+     * Never publish this diagnostic guess as a vehicle navigation command. */
+    optical_guess = barcode_guess_runs(trace.widths_us, trace.count,
+                                      trace.truncated, active_letter_mask());
+    print_confidence("ao_time_diagnostic", "junction", &optical_guess, trace.count);
+
+    /* Report the same matcher on the encoder widths collected by the production
+     * decoder. With fewer than 29 completed elements, this is only a hint. */
+    encoder_count = decoder.count;
+    if (encoder_count > BARCODE_FRAME_ELEMENTS)
+        encoder_count = BARCODE_FRAME_ELEMENTS;
+    for (unsigned i = 0U; i < encoder_count; ++i)
+        encoder_widths[i] = decoder.elements[i];
+
+    encoder_guess = (barcode_guess_t){.letter = BARCODE_NO_LETTER};
+    if (decoder.last_score != 0U && decoder.last_letter < 26U &&
+        decoder.phase != 1U)
+    {
+        /* The real production decoder already scored a full frame.
+         * Phase 2 means the trailing white quiet zone is still pending. */
+        encoder_guess.letter = decoder.last_letter;
+        encoder_guess.score = decoder.last_score;
+        encoder_guess.margin = decoder.last_margin;
+        encoder_guess.complete = true;
+        encoder_guess.accepted = decoder.phase == 2U;
+        encoder_state = decoder.phase == 2U ? "awaiting_trailing_quiet" : "full_frame_rejected";
+    }
+    else
+    {
+        encoder_guess = barcode_guess_runs(encoder_widths, encoder_count,
+                                         false, decoder.allowed_letters);
+        encoder_state = decoder.phase == 1U ? "partial_frame" : "no_active_frame";
+    }
+    print_confidence("encoder_ticks_diagnostic", encoder_state,
+                     &encoder_guess, encoder_count);
+}
+
+static void publish_scan(barcode_character_t character, uint8_t score, uint8_t margin,
+                         uint32_t started_us, uint32_t completed_us)
 {
     if (tk_loc_mtx(status_mutex, TMO_FEVR) != E_OK)
         return;
-    latest_scan.character = (barcode_character_t){guess.letter, guess.reversed};
+    latest_scan.character = character;
     latest_scan.started_us = started_us;
     latest_scan.completed_us = completed_us;
     latest_scan.available = true;
     ++statistics.decoded;
-    __atomic_store_n(&last_scan_letter, (uint8_t)(guess.letter + 1U), __ATOMIC_RELEASE);
+    __atomic_store_n(&last_scan_letter, (uint8_t)(character.letter + 1U), __ATOMIC_RELEASE);
     (void)tk_unl_mtx(status_mutex);
-    if (guess.ranked_widths)
-        tm_printf((UB *)"[S3 BARCODE SCAN] letter=%c method=ranked_widths reversed=%u\n",
-                  'A' + guess.letter, (UINT)guess.reversed);
-    else
-        tm_printf((UB *)"[S3 BARCODE SCAN] letter=%c score=%u margin=%u reversed=%u\n",
-                  'A' + guess.letter, (UINT)guess.score, (UINT)guess.margin, (UINT)guess.reversed);
+
+    tm_printf((UB *)"[S3 BARCODE SCAN] letter=%c score=%u margin=%u method=encoder_ticks reversed=%u\n",
+              (INT)('A' + character.letter), (UINT)score, (UINT)margin,
+              (UINT)character.reversed);
+}
+
+static void process_encoder_observation(const barcode_encoder_observation_t *sample)
+{
+    barcode_character_t character;
+    const bool black = (sample->flags & BARCODE_OBSERVATION_BLACK) != 0U;
+    if ((sample->flags & BARCODE_OBSERVATION_RESTART) != 0U)
+    {
+        barcode_decoder_reset(&decoder);
+        frame_started_us = 0U;
+    }
+    const bool was_busy = barcode_decoder_in_progress(&decoder);
+    const uint32_t previous_start_us = frame_started_us;
+    const barcode_feed_result_t result =
+        barcode_decoder_feed(&decoder, black, sample->position, &character);
+
+    count(&statistics.samples);
+
+    if (result == BARCODE_REJECTED)
+    {
+        count(&statistics.rejected);
+        if (decoder.last_score != 0U)
+            tm_printf((UB *)"[S3 BARCODE REJECT] best=%c score=%u margin=%u required=85/15\n",
+                      decoder.last_letter < 26U ? (INT)('A' + decoder.last_letter) : '?',
+                      (UINT)decoder.last_score, (UINT)decoder.last_margin);
+        frame_started_us = 0U;
+        return;
+    }
+    if (result == BARCODE_BAD_ARGUMENT)
+    {
+        count(&statistics.rejected);
+        barcode_decoder_reset(&decoder);
+        frame_started_us = 0U;
+        tm_printf((UB *)"[S3 BARCODE] decoder argument/configuration error\n");
+        return;
+    }
+
+    if (result == BARCODE_CHARACTER)
+    {
+        publish_scan(character, decoder.completed_score, decoder.completed_margin,
+                     previous_start_us != 0U ? previous_start_us : sample->captured_us,
+                     sample->captured_us);
+        frame_started_us = barcode_decoder_in_progress(&decoder) ? sample->captured_us : 0U;
+        return;
+    }
+
+    if (!was_busy && barcode_decoder_in_progress(&decoder))
+    {
+        frame_started_us = sample->captured_us;
+        /* The S5/ MQTT route map is already active before line following starts.
+         * Restrict this barcode candidate to those mapped letters. */
+        barcode_decoder_set_allowed_letters(&decoder, active_letter_mask());
+    }
+    else if (!barcode_decoder_in_progress(&decoder))
+        frame_started_us = 0U;
 }
 
 static void barcode_worker(INT stacd, void *exinf)
 {
-    static uint32_t attempt_widths[BARCODE_RAW_MAX_RUNS];
-    uint32_t widths[BARCODE_FRAME_ELEMENTS];
-    unsigned count_runs = 0, attempt_runs = 0;
-    uint32_t started_us = 0, reported_faults = 0, last_run_end_us = 0;
-    bool attempt_decoded = false;
+    uint32_t reported_faults = 0U;
+    uint32_t last_adc_print_us = 0U;
     (void)stacd;
     (void)exinf;
+
     const ER result = barcode_capture_start(worker_id);
     if (result != E_OK)
     {
-        tm_printf((UB *)"[S3 BARCODE] GPIO/timer startup failed (%d).\n", (INT)result);
+        tm_printf((UB *)"[S3 BARCODE] AO/encoder capture startup failed (%d)\n", (INT)result);
         tk_ext_tsk();
         return;
     }
-    tm_printf((UB *)"[S3 BARCODE] DO GP%u; always-on; %u us capture; black=%s\n",
-              BARCODE_GPIO_PIN, BARCODE_CAPTURE_PERIOD_US, BARCODE_BLACK_HIGH ? "high" : "low");
+
+    tm_printf((UB *)"[S3 BARCODE] AO GP%u ADC threshold=%u; encoder-distance decoding; sample=%u us\n",
+              BARCODE_GPIO_PIN, (UINT)BARCODE_ADC_THRESHOLD, BARCODE_CAPTURE_PERIOD_US);
 
     for (;;)
     {
-        barcode_optical_run_t run;
-        const ER popped = barcode_capture_pop(&run);
+        barcode_encoder_observation_t sample;
+        const uint32_t now_us = barcode_port_now_us();
+        if (now_us - last_adc_print_us >= 250000U)
+        {
+            last_adc_print_us = now_us;
+            tm_printf((UB *)"[S3 BARCODE ADC] raw=%u\n", (UINT)barcode_port_sensor_raw());
+        }
+
         const uint32_t faults = barcode_capture_take_faults();
         if (faults != 0U)
         {
-            count_runs = 0;
+            barcode_decoder_reset(&decoder);
+            frame_started_us = 0U;
             if ((faults & ~reported_faults) != 0U)
-                tm_printf((UB *)"[S3 BARCODE] optical capture fault=0x%x; resuming\n", (UINT)faults);
+                tm_printf((UB *)"[S3 BARCODE] AO/encoder capture fault=0x%x; resuming\n", (UINT)faults);
             reported_faults |= faults;
-            continue;
         }
-        if (popped != E_OK)
+
+        const ER popped = barcode_capture_pop(&sample);
+        if (popped == E_OK)
         {
-            print_raw_scan();
-            if (attempt_runs != 0U && barcode_port_now_us() - last_run_end_us >= BARCODE_ATTEMPT_IDLE_US &&
-                barcode_port_sensor_high() != (BARCODE_BLACK_HIGH != 0U))
+            if (barcode_port_now_us() - sample.captured_us > BARCODE_QUEUE_MAX_AGE_US)
             {
-                if (!attempt_decoded)
-                {
-                    const unsigned shown = attempt_runs < BARCODE_RAW_MAX_RUNS ? attempt_runs : BARCODE_RAW_MAX_RUNS;
-                    const INT length = tm_sprintf(trace_text,
-                        (UB *)"[S3 BARCODE ATTEMPT] no decode; runs=%u widths_us=", attempt_runs);
-                    print_trace_widths(length, attempt_widths, shown);
-                }
-                attempt_runs = 0;
-                attempt_decoded = false;
-            }
-            (void)tk_slp_tsk(10);
-            (void)tk_can_wup(TSK_SELF);
-            continue;
-        }
-
-        count(&statistics.samples);
-        const uint32_t run_end_us = run.started_us + run.width_us;
-        if (attempt_runs != 0U || run.black)
-        {
-            if (attempt_runs < BARCODE_RAW_MAX_RUNS)
-                attempt_widths[attempt_runs] = run.width_us;
-            ++attempt_runs;
-            last_run_end_us = run_end_us;
-        }
-        if (run.width_us > BARCODE_OPTICAL_MAX_RUN_US ||
-            barcode_port_now_us() - run_end_us > BARCODE_QUEUE_MAX_AGE_US)
-        {
-            count_runs = 0;
-            continue;
-        }
-        if (count_runs == 0U)
-        {
-            if (!run.black)
+                barcode_decoder_reset(&decoder);
+                frame_started_us = 0U;
+                count(&statistics.rejected);
                 continue;
-            started_us = run.started_us;
-        }
-        widths[count_runs++] = run.width_us;
-        if (count_runs < BARCODE_FRAME_ELEMENTS)
+            }
+            process_encoder_observation(&sample);
             continue;
+        }
 
-        const barcode_guess_t guess = barcode_guess_frame(widths);
-        if (guess.accepted)
+        print_raw_scan();
+        if (barcode_decoder_in_progress(&decoder) && frame_started_us != 0U)
         {
-            publish_scan(guess, started_us, run_end_us);
-            attempt_decoded = true;
-            count_runs = 0;
-            reported_faults = 0U;
+            const uint32_t now = barcode_port_now_us();
+            if (now - barcode_capture_last_motion_us() > BARCODE_STALL_TIMEOUT_US ||
+                now - frame_started_us > BARCODE_FRAME_TIMEOUT_US)
+            {
+                barcode_decoder_reset(&decoder);
+                frame_started_us = 0U;
+                count(&statistics.rejected);
+                tm_printf((UB *)"[S3 BARCODE] encoder scan timeout; candidate discarded\n");
+            }
         }
-        else
-        {
-            /* Keep the next black-aligned candidate after an extra mark. */
-            started_us += widths[0] + widths[1];
-            count_runs -= 2U;
-            for (unsigned i = 0; i < count_runs; ++i)
-                widths[i] = widths[i + 2U];
-        }
+
+        (void)tk_slp_tsk(10);
+        (void)tk_can_wup(TSK_SELF);
     }
+
+    barcode_capture_stop();
+    tk_ext_tsk();
 }
+
 #else
 static const char *current_line_direction(void)
 {
@@ -400,18 +514,19 @@ ER barcode_task_init(void)
         return E_OBJ;
     statistics = (barcode_task_status_t){0};
     __atomic_store_n(&last_scan_letter, 0U, __ATOMIC_RELEASE);
-#if APP_TEST
-    T_CMBF buffer = {0};
     const barcode_decoder_config_t config = {BARCODE_MIN_ELEMENT_TICKS, BARCODE_MAX_ELEMENT_TICKS,
                                              BARCODE_MAX_STEP_TICKS};
+    if (!barcode_decoder_init(&decoder, &config))
+        return E_PAR;
+#if APP_TEST
+    T_CMBF buffer = {0};
     diagnostic_ready = false;
     producer_gap = true;
     active_generation = 0;
     next_scan_id = 0;
-    if (!barcode_decoder_init(&decoder, &config))
-        return E_PAR;
 #else
     latest_scan.available = false;
+    frame_started_us = 0U;
 #endif
     result = barcode_shared_init();
     if (result != E_OK)

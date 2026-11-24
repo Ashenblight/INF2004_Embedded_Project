@@ -15,13 +15,14 @@
 #define LINE_CENTRE_BLACK_HIGH    (1U)
 #endif
 
-/* Barcode module DO on Grove 7 / GP28. 1 means black reads HIGH. */
+/* Barcode module AO on Grove 7 / GP28 (ADC2). */
+#define BARCODE_ADC_THRESHOLD     (800U)
 #define BARCODE_BLACK_HIGH        (1U)
 /* 250 us nominal = 4 kHz. Set to 500 us for a 2 kHz comparison. */
-#define BARCODE_CAPTURE_PERIOD_US (250U)
+#define BARCODE_CAPTURE_PERIOD_US (100U)
 
 /* Line-following cruise target as a percentage of the nominal encoder speed. */
-#define LINE_CRUISE_SPEED_PERCENT (40)
+#define LINE_CRUISE_SPEED_PERCENT (10)
 
 /* Magnitude of the line-following steering correction, 1 through 127. */
 #ifndef LINE_STEERING_CORRECTIONit 
