@@ -6,6 +6,7 @@
 
 #include <stdatomic.h>
 #include "drv_motor.h"
+#include "../../config/sensor_calibration.h"
 
 /* RP2040 Hardware Register Base Addresses */
 #define RP2040_RESETS_BASE     (0x4000C000UL)
@@ -50,7 +51,7 @@ static atomic_bool g_motor_stop_latched;
 
 /* Private function prototypes (BARR-C Rule 4.3.b). */
 static inline void reg_gpio_ctrl_write (uint32_t pin, uint32_t val);
-static uint32_t    channel_cc_compute (int16_t pwm_cmd);
+static uint32_t    channel_cc_compute (int32_t pwm_cmd);
 
 /* ========================================================================= */
 /* Public API Functions                                                      */
@@ -159,10 +160,10 @@ void drv_motor_set_speed (int16_t left_pwm, int16_t right_pwm)
     REG_PWM_CH5_CSR |= PWM_CSR_EN_BIT;
 
     /* Left Motor (Slice 4: GP8=IN1, GP9=IN2) */
-    REG_PWM_CH4_CC = channel_cc_compute(left_pwm);
+    REG_PWM_CH4_CC = channel_cc_compute((int32_t)left_pwm * MOTOR_LEFT_POLARITY);
 
     /* Right Motor (Slice 5: GP10=IN1, GP11=IN2) */
-    REG_PWM_CH5_CC = channel_cc_compute(right_pwm);
+    REG_PWM_CH5_CC = channel_cc_compute((int32_t)right_pwm * MOTOR_RIGHT_POLARITY);
 }
 
 /* ========================================================================= */
@@ -186,16 +187,16 @@ static inline void reg_gpio_ctrl_write (uint32_t pin, uint32_t val)
 
 /**
  * @brief Convert signed PWM duty command into RP2040 CC register format.
- * @param[in] pwm_cmd Signed PWM command count.
+ * @param[in] pwm_cmd Motor PWM after applying wiring polarity, in [-32768, 32768].
  * @return Formatted 32-bit CC register value.
  */
-static uint32_t channel_cc_compute (int16_t pwm_cmd)
+static uint32_t channel_cc_compute (int32_t pwm_cmd)
 {
     uint32_t cc_val = 0UL;
 
     if (pwm_cmd >= 0)
     {
-        /* Cast is safe: pwm_cmd is verified non-negative [0..32767]. */
+        /* Cast is safe: pwm_cmd is non-negative [0..32768]. */
         uint32_t duty = (uint32_t)pwm_cmd;
 
         if (duty > MOTOR_PWM_WRAP_COUNT)
@@ -208,8 +209,7 @@ static uint32_t channel_cc_compute (int16_t pwm_cmd)
     }
     else
     {
-        /* Cast to int32_t prevents overflow when negating INT16_MIN. */
-        int32_t const pos_pwm = -((int32_t)pwm_cmd);
+        int32_t const pos_pwm = -pwm_cmd;
         /* Cast is safe: pos_pwm is strictly positive [1..32768]. */
         uint32_t      duty    = (uint32_t)pos_pwm;
 

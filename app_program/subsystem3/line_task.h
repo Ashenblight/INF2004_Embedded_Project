@@ -9,7 +9,7 @@
 #define LINE_LEFT_GPIO_PIN          (0U)
 #define LINE_CENTRE_GPIO_PIN        (2U)
 
-#define LINE_SAMPLE_PERIOD_MS       (10U)
+#define LINE_SAMPLE_PERIOD_MS       ROBOT_CONTROL_PERIOD_MS
 #define LINE_LOG_PERIOD_MS          (250U)
 #define LINE_STATUS_MAX_AGE_MS      (3U * LINE_SAMPLE_PERIOD_MS)
 

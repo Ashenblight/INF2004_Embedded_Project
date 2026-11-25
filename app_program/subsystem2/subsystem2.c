@@ -16,10 +16,11 @@
 #define TARGET_BASE_CRUISE_TICKS     (1)   /* Set base target to 1 tick. */
 #define MILLITICKS_PER_TICK          (1000)
 #define KP_SPEED                     (320)
-#define KI_SPEED                     (35)
-#define INTEGRAL_CLAMP               (150)
-#define ACTIVE_BRAKE_TICKS           (10U) /* Hold active brake for 100 ms. */
-#define STOP_TIMEOUT_TICKS           (15U)
+#define KI_SPEED                     (8)
+#define SPEED_FILTER_DIVISOR         (4)
+#define SPEED_INTEGRAL_PWM_LIMIT     (1500)
+#define ACTIVE_BRAKE_TICKS           ((100U + ROBOT_CONTROL_PERIOD_MS - 1U) / ROBOT_CONTROL_PERIOD_MS)
+#define STOP_TIMEOUT_TICKS           (150U / ROBOT_CONTROL_PERIOD_MS)
 #define MAX_SPEED_DUTY               (100U)
 #define DEFAULT_SPEED_DUTY           (50U)
 #define MAX_DISTANCE_MM              (1023U)
@@ -28,7 +29,7 @@
 #define REVERSE_ANGLE_MARKER         (-1)
 #define DELTA_TICK_MAX               (127)
 #define DELTA_TICK_MIN               (-128)
-#define TASK_PERIOD_MS               (10)
+#define TASK_PERIOD_US               (ROBOT_CONTROL_PERIOD_MS * 1000)
 #define MOTION_TASK_PRIORITY         (5)
 #define CMD_MBF_BUFFER_BYTES         (64)
 #define FLAG_STOP_REQUEST            (0x00000001U)
@@ -37,8 +38,7 @@
 #define FLAG_MOVEMENT_COMPLETE       (0x00000004U) /* Signal move completion. */
 
 #define MOTOR_DEADBAND_MIN_PWM       (1750)
-#define LINE_STEER_RETURN_STEP_PWM   (175)
-#define LINE_STEER_GAIN              (35)
+#define LINE_STEER_STEP_PERCENT      (10)
 #define MANOEUVRE_STRAIGHT_BASE_PWM  (1750)
 #define MANOEUVRE_STRAIGHT_GAIN      (12)
 #define MANOEUVRE_TURN_BASE_PWM      (1650)
@@ -52,6 +52,20 @@ typedef enum
     MANOEUVRE_DIR_TURN_CW  = 2,
     MANOEUVRE_DIR_TURN_CCW = 3
 } manoeuvre_dir_t;
+
+typedef struct
+{
+    int32_t speed_milliticks;
+    int32_t integral_millipwm;
+} cruise_wheel_t;
+
+typedef struct
+{
+    cruise_wheel_t left;
+    cruise_wheel_t right;
+    int32_t steering_percent;
+    bool line_mode;
+} cruise_control_t;
 
 /**
  * NOTE: Compatibility handles and white-box test symbols below preserve their
@@ -67,11 +81,14 @@ EXPORT volatile int8_t            s_latest_steering_offset = 0;
 /* Internal Subsystem 2 Task & State Handles (BARR-C Rule 7.1.j/m/n/o) */
 static ID                         gh_flg_motion            = 0;
 static ID                         gh_tskid_motion          = 0;
+static ID                         g_motion_cyclic_id;
 static motion_state_t             g_current_state          = MOTION_STATE_IDLE;
 static bool                       gb_line_mode_authorized  = false;
 static volatile bool              gb_emergency_latched     = false;
 static uint32_t                   g_latest_motion_status = 0U;
+static volatile uint32_t          g_max_control_gap_us    = 0U;
 static manoeuvre_dir_t            g_manoeuvre_dir          = MANOEUVRE_DIR_FWD;
+/* Compare the sum of both wheels against twice the per-wheel target. */
 static int32_t                    g_manoeuvre_target_ticks = 0;
 static int32_t                    g_manoeuvre_accumulated  = 0;
 static uint8_t                    g_active_speed_duty      = DEFAULT_SPEED_DUTY;
@@ -80,18 +97,19 @@ static uint8_t                    g_active_speed_duty      = DEFAULT_SPEED_DUTY;
 static void    flush_command_buffer (void);
 static void    parse_and_apply_command (
                    motion_command_packed_t const * const p_cmd);
-static int16_t line_drive_pwm (int32_t target_milliticks,
-                               int8_t  measured_ticks,
-                               int32_t steering_pwm);
+static int16_t line_drive_pwm (cruise_wheel_t *wheel,
+                               int32_t target_milliticks,
+                               int32_t measured_milliticks);
 static void    update_line_steering (bool            b_line_mode,
-                                     int32_t * const p_line_steer_pwm);
+                                     int32_t * const steering_percent);
 static void    apply_manoeuvre_drive (void);
 static void    process_emergency_events (uint32_t * const p_brake_timer);
 static void    handle_state_idle (void);
 static void    handle_state_continuous (bool            b_line_mode,
                                         int8_t          delta_l,
                                         int8_t          delta_r,
-                                        int32_t * const p_line_steer_pwm);
+                                        uint32_t        sample_us,
+                                        cruise_control_t *cruise);
 static void    handle_state_manoeuvre (int8_t           delta_l,
                                        int8_t           delta_r,
                                        uint32_t * const p_brake_timer);
@@ -478,8 +496,20 @@ EXPORT ER subsystem2_init (void)
         mpf_samples = tk_cre_mpf(&cmpf);
         result = mpf_samples;
     }
+    if (E_OK < result)
+    {
+        /* Boot is pinned to core 0, which owns the encoder's GPIO IRQ. */
+        drv_motor_init();
+        drv_encoder_init();
+        result = drv_encoder_start_irq();
+        CHECK(result, "encoder GPIO IRQ setup");
+    }
     if (result < E_OK)
     {
+        if (0 < mpf_samples)
+        {
+            CHECK(tk_del_mpf(mpf_samples), "delete motion sample pool");
+        }
         if (0 < sem_slots)
         {
             CHECK(tk_del_sem(sem_slots), "delete motion semaphore");
@@ -499,37 +529,33 @@ EXPORT ER subsystem2_init (void)
         return (result);
     }
 
-    /* Step 3: Initialize Hardware Drivers */
-    drv_motor_init();
-    drv_encoder_init();
-
     return (E_OK);
 }
 
+uint32_t motion_take_max_control_gap_us (void)
+{
+    UW saved;
+    DI(saved);
+    const uint32_t gap = g_max_control_gap_us;
+    g_max_control_gap_us = 0U;
+    EI(saved);
+    return gap;
+}
+
 /**
- * @brief Phase 2 startup: spawn the 10 ms periodic motion control RTOS task.
+ * @brief Phase 2 startup: spawn Motion Control and schedule its periodic wakeup.
  * @return E_OK if the task started or a kernel error on failure.
  */
 EXPORT ER subsystem2_start (void)
 {
-    ER result = E_OK;
-
-    if (gh_tskid_motion <= 0)
+    if (gh_tskid_motion > 0)
     {
-        /* Priority 5: Highest application task in system. */
-        /* Cast converts task function pointer to uT-Kernel FP type. */
-        gh_tskid_motion = app_start_task((FP)motion_control_task,
-                                         MOTION_TASK_PRIORITY,
-                                         TP_PRC1,
-                                         "motion_task");
-
-        if (gh_tskid_motion <= 0)
-        {
-            result = gh_tskid_motion;
-        }
+        return E_OK;
     }
 
-    return (result);
+    gh_tskid_motion = app_start_periodic_task((FP)motion_control_task, MOTION_TASK_PRIORITY,
+        TP_PRC1, "motion_task", ROBOT_CONTROL_PERIOD_MS, &g_motion_cyclic_id);
+    return gh_tskid_motion < E_OK ? gh_tskid_motion : E_OK;
 }
 
 #if APP_TEST
@@ -623,7 +649,7 @@ static void parse_and_apply_command (
         case (uint32_t)MOTION_CMD_DRIVE_DISTANCE:
             /* Cast to int32_t avoids mixing signed/unsigned in product. */
             g_manoeuvre_target_ticks =
-                ((int32_t)p_cmd->target_distance_mm) * ENCODER_CAL_TICKS_PER_MM;
+                2 * ((int32_t)p_cmd->target_distance_mm) * ENCODER_CAL_TICKS_PER_MM;
             g_manoeuvre_accumulated  = 0;
             g_manoeuvre_dir          = (decoded_angle < 0)
                                            ? MANOEUVRE_DIR_BWD
@@ -638,7 +664,7 @@ static void parse_and_apply_command (
                                            ? (int32_t)decoded_angle
                                            : -((int32_t)decoded_angle);
 
-            g_manoeuvre_target_ticks = abs_angle * ENCODER_CAL_TICKS_PER_DEG;
+            g_manoeuvre_target_ticks = 2 * abs_angle * ENCODER_CAL_TICKS_PER_DEG;
             g_manoeuvre_accumulated  = 0;
             g_manoeuvre_dir          = (decoded_angle >= 0)
                                            ? MANOEUVRE_DIR_TURN_CW
@@ -654,25 +680,41 @@ static void parse_and_apply_command (
 }
 
 /**
- * @brief Calculate feedforward + proportional PWM for continuous driving.
+ * @brief Calculate feedforward plus filtered PI feedback for continuous drive.
+ * @param[in,out] wheel Speed filter and integral correction for this wheel.
  * @param[in] target_milliticks Target in thousandths of an encoder tick per 10 ms.
- * @param[in] measured_ticks Measured tick count in current 10 ms period.
- * @param[in] steering_pwm   Signed steering PWM adjustment.
+ * @param[in] measured_milliticks Measured wheel rate per 10 ms, positive forward.
  * @return Clamped signed 16-bit PWM command in [0..12500].
  */
-static int16_t line_drive_pwm (int32_t target_milliticks,
-                               int8_t  measured_ticks,
-                               int32_t steering_pwm)
+static int16_t line_drive_pwm (cruise_wheel_t *wheel,
+                               int32_t target_milliticks,
+                               int32_t measured_milliticks)
 {
-    /* Reverse counts mean no forward progress during line following. */
-    /* Cast is safe: measured_ticks is positive [1..127]. */
-    int32_t const forward_ticks = (measured_ticks > 0)
-                                      ? (int32_t)measured_ticks
-                                      : 0;
-    int32_t const error_milliticks = target_milliticks - forward_ticks * MILLITICKS_PER_TICK;
-    int32_t       pwm           = MOTOR_DEADBAND_MIN_PWM +
-                                  (KP_SPEED * error_milliticks / MILLITICKS_PER_TICK) +
-                                  steering_pwm;
+    wheel->speed_milliticks += (measured_milliticks -
+                                wheel->speed_milliticks) / SPEED_FILTER_DIVISOR;
+    const int32_t forward_milliticks = wheel->speed_milliticks > 0 ?
+                                      wheel->speed_milliticks : 0;
+    const int32_t error_milliticks = target_milliticks - forward_milliticks;
+    const int32_t base_pwm = MOTOR_DEADBAND_MIN_PWM +
+                             (KP_SPEED * error_milliticks / MILLITICKS_PER_TICK);
+    const int32_t integral_limit = SPEED_INTEGRAL_PWM_LIMIT * MILLITICKS_PER_TICK;
+    int32_t integral = wheel->integral_millipwm + KI_SPEED * error_milliticks;
+    if (integral > integral_limit)
+    {
+        integral = integral_limit;
+    }
+    else if (integral < -integral_limit)
+    {
+        integral = -integral_limit;
+    }
+    const int32_t candidate_pwm = base_pwm + integral / MILLITICKS_PER_TICK;
+    /* Do not build up correction while it would push further into a limit. */
+    if (!((candidate_pwm >= (int32_t)MOTOR_PWM_WRAP_COUNT && error_milliticks > 0) ||
+          (candidate_pwm <= 0 && error_milliticks < 0)))
+    {
+        wheel->integral_millipwm = integral;
+    }
+    int32_t pwm = base_pwm + wheel->integral_millipwm / MILLITICKS_PER_TICK;
 
     /* Cast is safe: MOTOR_PWM_WRAP_COUNT (12500) fits in int32_t. */
     if (pwm > (int32_t)MOTOR_PWM_WRAP_COUNT)
@@ -687,38 +729,34 @@ static int16_t line_drive_pwm (int32_t target_milliticks,
 }
 
 /**
- * @brief Update lateral steering PWM with decay return when offset is zero.
+ * @brief Limit how quickly the wheel target split changes between line readings.
  * @param[in]     b_line_mode      True if line-following steering is active.
- * @param[in,out] p_line_steer_pwm Pointer to persistent steering PWM state.
+ * @param[in,out] steering_percent Current signed percentage split.
  */
 static void update_line_steering (bool            b_line_mode,
-                                  int32_t * const p_line_steer_pwm)
+                                  int32_t * const steering_percent)
 {
     if (!b_line_mode)
     {
-        *p_line_steer_pwm = 0;
+        *steering_percent = 0;
     }
     else
     {
-        /* Cast is safe: int8_t offset [-128..127] widens to int32_t. */
-        int32_t const requested_steer =
-            (int32_t)s_latest_steering_offset * LINE_STEER_GAIN;
-
-        if (0 != requested_steer)
+        const int32_t request = motion_get_steering_offset();
+        const int32_t requested_steer = request > 100 ? 100 :
+            (request < -100 ? -100 : request);
+        const int32_t change = requested_steer - *steering_percent;
+        if (change > LINE_STEER_STEP_PERCENT)
         {
-            *p_line_steer_pwm = requested_steer;
+            *steering_percent += LINE_STEER_STEP_PERCENT;
         }
-        else if (*p_line_steer_pwm > LINE_STEER_RETURN_STEP_PWM)
+        else if (change < -LINE_STEER_STEP_PERCENT)
         {
-            *p_line_steer_pwm -= LINE_STEER_RETURN_STEP_PWM;
-        }
-        else if (*p_line_steer_pwm < -LINE_STEER_RETURN_STEP_PWM)
-        {
-            *p_line_steer_pwm += LINE_STEER_RETURN_STEP_PWM;
+            *steering_percent -= LINE_STEER_STEP_PERCENT;
         }
         else
         {
-            *p_line_steer_pwm = 0;
+            *steering_percent = requested_steer;
         }
     }
 }
@@ -830,12 +868,14 @@ static void handle_state_idle (void)
  * @param[in]     b_line_mode      True if line-following steering is active.
  * @param[in]     delta_l          Left encoder tick delta in current window.
  * @param[in]     delta_r          Right encoder tick delta in current window.
- * @param[in,out] p_line_steer_pwm Pointer to persistent steering PWM state.
+ * @param[in]     sample_us        Actual duration of that encoder window.
+ * @param[in,out] cruise Wheel feedback and steering state for this cruise.
  */
 static void handle_state_continuous (bool            b_line_mode,
                                      int8_t          delta_l,
                                      int8_t          delta_r,
-                                     int32_t * const p_line_steer_pwm)
+                                     uint32_t        sample_us,
+                                     cruise_control_t *cruise)
 {
     motion_command_packed_t override_cmd = {0};
 
@@ -844,6 +884,7 @@ static void handle_state_continuous (bool            b_line_mode,
     if ((s_mbf_motion_cmds > 0) &&
         (tk_rcv_mbf(s_mbf_motion_cmds, (void *)&override_cmd, TMO_POL) > 0))
     {
+        *cruise = (cruise_control_t){.line_mode = b_line_mode};
         parse_and_apply_command(&override_cmd);
     }
     else
@@ -853,20 +894,28 @@ static void handle_state_continuous (bool            b_line_mode,
         int32_t target_milliticks = (scaled_ticks / (int32_t)DEFAULT_SPEED_DUTY) * MILLITICKS_PER_TICK;
         if (b_line_mode)
         {
-            target_milliticks = (scaled_ticks * LINE_CRUISE_SPEED_PERCENT * (MILLITICKS_PER_TICK / 100)) /
-                                (int32_t)DEFAULT_SPEED_DUTY;
+            target_milliticks = (LINE_CRUISE_BASE_TICKS_PER_UPDATE *
+                                 (int32_t)g_active_speed_duty * LINE_CRUISE_SPEED_PERCENT *
+                                 (MILLITICKS_PER_TICK / 100)) / (int32_t)DEFAULT_SPEED_DUTY;
         }
 
-        /* Step 3: Dynamic steering return handling. */
-        update_line_steering(b_line_mode, p_line_steer_pwm);
+        update_line_steering(b_line_mode, &cruise->steering_percent);
 
-        /* Step 4: Drive motors using feedforward floor + P feedback. */
-        int16_t const left_pwm  = line_drive_pwm(target_milliticks,
-                                                 delta_l,
-                                                 *p_line_steer_pwm);
-        int16_t const right_pwm = line_drive_pwm(target_milliticks,
-                                                 delta_r,
-                                                 -(*p_line_steer_pwm));
+        /* Bound the divisor to avoid huge rate spikes from clustered wakeups.
+         * A signed tick times 10,000 us times 1,000 still fits int32_t. */
+        const int32_t elapsed = sample_us > INT32_MAX ? INT32_MAX :
+            (sample_us < TASK_PERIOD_US / 2 ? TASK_PERIOD_US / 2 : (int32_t)sample_us);
+        const int32_t rate_scale = TASK_PERIOD_US * MILLITICKS_PER_TICK;
+        const int32_t left_forward = (int32_t)delta_l * ENCODER_LEFT_FORWARD_SIGN *
+                                      rate_scale / elapsed;
+        const int32_t right_forward = (int32_t)delta_r * ENCODER_RIGHT_FORWARD_SIGN *
+                                       rate_scale / elapsed;
+        /* The wheel loops regulate the requested turn as part of their targets. */
+        const int32_t turn_milliticks = target_milliticks * cruise->steering_percent / 100;
+        const int16_t left_pwm = line_drive_pwm(&cruise->left,
+            target_milliticks + turn_milliticks, left_forward);
+        const int16_t right_pwm = line_drive_pwm(&cruise->right,
+            target_milliticks - turn_milliticks, right_forward);
 
         drv_motor_set_speed(left_pwm, right_pwm);
     }
@@ -901,9 +950,7 @@ static void handle_state_manoeuvre (int8_t           delta_l,
         int32_t const abs_r    = (delta_r >= 0)
                                      ? (int32_t)delta_r
                                      : -((int32_t)delta_r);
-        int32_t const step_mag = (abs_l + abs_r) / 2;
-
-        g_manoeuvre_accumulated += step_mag;
+        g_manoeuvre_accumulated += abs_l + abs_r;
 
         if (g_manoeuvre_accumulated >= g_manoeuvre_target_ticks)
         {
@@ -1010,21 +1057,30 @@ static void motion_control_task (INT stacd, void * const p_exinf)
 
     int32_t  last_l         = 0;
     int32_t  last_r         = 0;
-    int32_t  line_steer_pwm = 0;
+    cruise_control_t cruise = {0};
     uint32_t brake_timer    = 0U;
+    uint32_t previous_us = rp2040_timer_us32();
+    drv_encoder_get_snapshot(&last_l, &last_r);
 
-    for (;;)
+    while (tk_slp_tsk(TMO_FEVR) == E_OK)
     {
-        /* Cast to void ignores sleep wake return code in periodic loop. */
-        (void)tk_dly_tsk(TASK_PERIOD_MS);
+        /* One update reflects all travel since the last sample. */
+        (void)tk_can_wup(TSK_SELF);
+        const uint32_t now_us = rp2040_timer_us32();
+        const uint32_t sample_us = now_us - previous_us;
+        previous_us = now_us;
+        if (sample_us > g_max_control_gap_us)
+        {
+            g_max_control_gap_us = sample_us;
+        }
 
         int32_t curr_l = 0;
         int32_t curr_r = 0;
 
         drv_encoder_get_snapshot(&curr_l, &curr_r);
 
-        int32_t const raw_delta_l = curr_l - last_l;
-        int32_t const raw_delta_r = curr_r - last_r;
+        int32_t const raw_delta_l = (int32_t)((uint32_t)curr_l - (uint32_t)last_l);
+        int32_t const raw_delta_r = (int32_t)((uint32_t)curr_r - (uint32_t)last_r);
 
         last_l = curr_l;
         last_r = curr_r;
@@ -1056,9 +1112,9 @@ static void motion_control_task (INT stacd, void * const p_exinf)
         bool const b_line_mode =
             __atomic_load_n(&gb_line_mode_authorized, __ATOMIC_ACQUIRE);
 
-        if ((!b_line_mode) || (MOTION_STATE_CONTINUOUS != g_current_state))
+        if ((MOTION_STATE_CONTINUOUS != g_current_state) || (cruise.line_mode != b_line_mode))
         {
-            line_steer_pwm = 0;
+            cruise = (cruise_control_t){.line_mode = b_line_mode};
         }
 
         /* State Machine Dispatcher */
@@ -1072,7 +1128,8 @@ static void motion_control_task (INT stacd, void * const p_exinf)
                 handle_state_continuous(b_line_mode,
                                         delta_l,
                                         delta_r,
-                                        &line_steer_pwm);
+                                        sample_us,
+                                        &cruise);
             break;
 
             case MOTION_STATE_MANOEUVRE:
@@ -1095,6 +1152,9 @@ static void motion_control_task (INT stacd, void * const p_exinf)
 
         update_telemetry_snapshot(delta_l, delta_r, brake_timer);
     }
+    motion_latch_run_stop();
+    CHECK(tk_del_cyc(g_motion_cyclic_id), "delete motion cyclic handler");
+    tk_ext_tsk();
 }
 
 /*** end of file ***/

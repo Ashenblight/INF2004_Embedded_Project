@@ -19,6 +19,7 @@
 #include "lwip/sys.h"
 #include "lwip/timeouts.h"
 #include "wifi_secrets.h"
+#include "robot_timing.h"
 #include "mqtt_utk.h"
 #include "../../../../app_program/subsystem1/robot_telemetry.h"
 #include "../../../../app_program/subsystem3/barcode_config.h"
@@ -28,7 +29,6 @@
 #define MQTT_UTK_HEARTBEAT_MS   5000
 #define MQTT_UTK_KEEPALIVE_S    60
 #define MQTT_UTK_RETRY_MS       3000U
-#define MQTT_UTK_TELEMETRY_MS   100U
 #define MQTT_UTK_TELEMETRY_TOPIC MQTT_CLIENT_ID "/telemetry/bench"
 
 /* Inbound message staging. A publish arrives as one topic callback followed by
@@ -286,7 +286,7 @@ void mqtt_utk_poll(void)
     }
 
 #if !APP_TEST
-    if (MQTT_UTK_TELEMETRY_MS <= (u32_t)(now_ms - last_telemetry_ms))
+    if (ROBOT_TELEMETRY_PERIOD_MS <= (u32_t)(now_ms - last_telemetry_ms))
     {
         uint8_t packet[ROBOT_TELEMETRY_SIZE];
         last_telemetry_ms = now_ms;

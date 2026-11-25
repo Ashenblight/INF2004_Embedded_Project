@@ -5,11 +5,15 @@ import struct
 import sys
 
 
-FRAME = struct.Struct("<BIBBbbIB")
-FRAME_HEADER = 0x18
+BENCH_V1 = struct.Struct("<BIBBbbIB")
+BENCH_V2 = struct.Struct("<BIBBbbIBH")
+BENCH_V3 = struct.Struct("<BIBBbbIBHH")
+BENCH_V4 = struct.Struct("<BIBBbbIBHHH")
 DIRECTIONS = ("STRAIGHT", "LEFT", "RIGHT", "CROSS_JUNCTION")
 MOTION_STATES = ("IDLE", "CONTINUOUS", "MANOEUVRE", "STOPPING", "STOPPED", "FAULT")
 STOP_REASONS = ("none", "pickup", "overturn", "sensor_error")
+SCAN_STATES = ("idle", "waiting_for_wheels", "measuring_forward", "coarse_sweep",
+               "refining_edges", "recentring", "complete", "failed")
 
 
 def acceleration_mg(word, shift):
@@ -19,12 +23,37 @@ def acceleration_mg(word, shift):
 
 
 def decode(payload):
-    if len(payload) != FRAME.size or payload[0] != FRAME_HEADER:
-        raise ValueError("expected a 14-byte bench telemetry frame")
+    obstacle = None
+    range_word = None
+    scan_word = None
+    if len(payload) == BENCH_V1.size and payload[0] == 0x18:
+        fields = BENCH_V1.unpack(payload)
+        peak_mm = None
+    elif len(payload) == BENCH_V2.size and payload[0] == 0x28:
+        *fields, peak_raw = BENCH_V2.unpack(payload)
+        peak_mm = None if peak_raw == 0xFFFF else peak_raw
+    elif len(payload) == BENCH_V3.size and payload[0] == 0x38:
+        *fields, peak_raw, range_word = BENCH_V3.unpack(payload)
+        peak_mm = None if peak_raw == 0xFFFF else peak_raw
+    elif len(payload) == BENCH_V4.size and payload[0] == 0x48:
+        *fields, peak_raw, range_word, scan_word = BENCH_V4.unpack(payload)
+        peak_mm = None if peak_raw == 0xFFFF else peak_raw
+    else:
+        raise ValueError("expected a v1, v2, v3 or v4 bench telemetry frame")
 
-    _, uptime, line, motion, left_ticks, right_ticks, imu, barcode = (
-        FRAME.unpack(payload)
-    )
+    if range_word is not None:
+        range_mm = range_word & 0x7FFF
+        obstacle = {"distance_mm": None if range_mm == 0x7FFF else range_mm,
+                    "holding": bool(range_word & 0x8000)}
+        if scan_word is not None:
+            scan_state = scan_word >> 12
+            if scan_state >= len(SCAN_STATES):
+                raise ValueError("invalid obstacle scan state")
+            width_mm = scan_word & 0x0FFF
+            obstacle["width_mm"] = None if width_mm == 0x0FFF else width_mm
+            obstacle["scan_state"] = SCAN_STATES[scan_state]
+
+    _, uptime, line, motion, left_ticks, right_ticks, imu, barcode = fields
     state = motion & 0x07
     if state >= len(MOTION_STATES):
         raise ValueError("invalid motion state")
@@ -55,6 +84,8 @@ def decode(payload):
         "imu_mg": {axis: acceleration_mg(imu, shift)
                    for axis, shift in (("x", 0), ("y", 10), ("z", 20))},
         "stop_reason": STOP_REASONS[imu >> 30],
+        "hump_peak_mm": peak_mm,
+        "obstacle": obstacle,
         "barcode": "UNKNOWN" if barcode == 31
                    else chr(ord("A") + barcode - 1) if barcode
                    else None,

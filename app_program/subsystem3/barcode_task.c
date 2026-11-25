@@ -239,7 +239,7 @@ static void barcode_worker(INT stacd, void *exinf)
         return;
     }
 
-    tm_printf((UB *)"[S3 BARCODE] AO GP%u ADC threshold=%u; encoder-distance decoding; sample=%u us\n",
+    tm_printf((UB *)"[S3 BARCODE] AO GP%u boot ADC threshold=%u; encoder-distance decoding; sample=%u us\n",
               BARCODE_GPIO_PIN, (UINT)BARCODE_ADC_THRESHOLD, BARCODE_CAPTURE_PERIOD_US);
 
     for (;;)
@@ -390,7 +390,6 @@ static void process(const barcode_observation_t *sample)
     barcode_feed_result_t result;
     barcode_movement_t movement;
     uint16_t revision;
-    SYSTIM now;
     uint32_t generation = barcode_shared_capture_generation();
     bool was_busy;
     if (generation == 0U || sample->generation != generation)
@@ -435,17 +434,12 @@ static void process(const barcode_observation_t *sample)
         count(&statistics.cancelled);
         return;
     }
-    if (tk_get_otm(&now) != E_OK)
-    {
-        notify_fault(BARCODE_FAULT_CLOCK);
-        return;
-    }
     message.movement = (uint8_t)movement;
     message.status =
         movement == BARCODE_MOVE_NONE ? BARCODE_RESULT_UNMAPPED : BARCODE_RESULT_MAPPED;
     message.mapping_revision = revision;
     message.generation = generation;
-    message.decoded_at_ms = now.lo;
+    message.decoded_at_ms = rp2040_timer_ms32();
     message.scan_id = ++next_scan_id;
     count(&statistics.decoded);
     if (!barcode_message_encode(bytes, sizeof(bytes), &message))

@@ -11,11 +11,17 @@
 #define DRV_ENCODER_H
 
 #include <stdint.h>
+#include <tk/tkernel.h>
 
 /**
- * @brief Initialize quadrature encoder GPIO pins, pads, and IO_IRQ_BANK0 ISR.
+ * @brief Initialize quadrature encoder GPIO pins and counters.
  */
 void drv_encoder_init (void);
+
+/* Install and enable the IO_BANK0 handler during core-0 startup. */
+ER drv_encoder_start_irq (void);
+/* Enable GP17 edges on the registered core-0 GPIO dispatcher. */
+ER drv_encoder_enable_echo_irq(void);
 
 /**
  * @brief Atomically sample and return cumulative left and right wheel ticks.
@@ -29,6 +35,13 @@ void drv_encoder_get_snapshot (int32_t * const p_left_ticks,
  * @brief Atomically reset both cumulative encoder tick counters to zero.
  */
 void drv_encoder_reset (void);
+
+/* Bit n is set after the encoder IRQ has seen an edge on GPn. Retained
+ * since encoder initialization, independently of the signed wheel counts. */
+uint32_t drv_encoder_get_irq_gpios (void);
+
+/* IRQ activity plus hardware edge flags still pending at IO_BANK0. */
+uint32_t drv_encoder_get_input_gpios (void);
 
 /**
  * @brief Shared GPIO IRQ callback stub for external compatibility.

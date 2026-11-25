@@ -55,7 +55,7 @@ The 500 microsecond timer only schedules observations. The strict decoder measur
 | Existing line steering | Motion calls `line_task_get_steering(line_steering_t *)`; VC calls `line_task_set_following_enabled(bool)` | Existing S3 startup already creates/starts the line tasks. In Motion's loop, handle errors and enforce mode; no new line buffer or direct barcode read is required. |
 | Encoder getter name | `barcode_port_read_encoder()` calls Buddy 2’s `motion_get_odometry(int32_t *, int32_t *)` in `barcode_port.c` | Link Buddy 2 Motion Control. The adapter returns `E_NOEXS` if the getter is absent. |
 | Encoder getter behaviour | Current, coherent, nonblocking, ISR-safe snapshot; **no mutex, sleeping, UART logging or cached 10 ms motor-loop value** | Agree an ISR-safe raw-counter snapshot. If counters update on the other core, use a coherent bounded snapshot mechanism; `volatile` alone is insufficient for several fields. A spinning seqlock can deadlock if its writer was interrupted on this core. |
-| Encoder snapshot fields | `position_ticks`: average of the two signed live wheel counts; `reset_epoch`: zero; `sampled_at_us`: RP2040 `TIMERAWL` time at the start of the read | Confirm both counts change in the same direction when moving forward. Keep odometry running without resets during scans. |
+| Encoder snapshot fields | `position_ticks`: average of live wheel counts after applying each encoder's forward sign; `reset_epoch`: zero; `sampled_at_us`: RP2040 `TIMERAWL` time at the start of the read | Verify the raw forward signs with a straight roll. Keep odometry running without resets during scans. |
 | Wheel/print calibration | Bounds in `barcode_config.h`: element 1–1024 ticks; maximum observation step 4096 ticks | Measure ticks per revolution, wheel circumference, minimum/maximum stripe widths and true maximum speed. Narrow stripes must cover enough ticks and observations to distinguish widths. The 1-tick lower limit is a software bound, not an accuracy claim. |
 | GPIO / polarity | Grove 7 GP28/ADC2 barcode AO, GP0 left and GP2 centre IR | Measure whether ADC counts rise on black. Edit BARCODE_ADC_BLACK_HIGH, BARCODE_ADC_THRESHOLD and BARCODE_ADC_HYSTERESIS in config/sensor_calibration.h. Keep Grove 7 GP7 connected to the right encoder. |
 | Hardware timer ownership | RP2040 hardware alarm 2 / IRQ 2, core 0, priority 3 (matching this template's scheduler); no shared GPIO IRQ handler is installed | Reserve alarm 2 with the team. If used elsewhere, choose a free hardware alarm in config; do not overwrite another subsystem's handler. This is separate from RTOS alarm-handler objects. |
@@ -115,7 +115,7 @@ This expands the earlier isolated 5-byte test record. It is a proposal to agree 
 | 4 | 2 | diagnostic scan ID, BE16 |
 | 6 | 2 | map revision, BE16, nonzero |
 | 8 | 4 | authorised scan-run generation, BE32, nonzero |
-| 12 | 4 | `tk_get_otm()` low32 milliseconds, BE32 |
+| 12 | 4 | Monotonic hardware uptime in milliseconds, low 32 bits, BE32 |
 
 Status 0=MAPPED requires action1–4. Status1=UNMAPPED requires NONE0. Reject all other statuses, reserved bits, letters26–31, lengths, versions/types. Decode with `barcode_message_decode()` and check its bool result. It changes the destination only on success.
 

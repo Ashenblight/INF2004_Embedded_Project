@@ -224,6 +224,12 @@ class MQTTFeed:
                 previous is None or previous["stop_reason"] != bench["stop_reason"]
             ):
                 self.log(f"IMU stop ({bench['stop_reason']})")
+            obstacle = bench["obstacle"]
+            previous_obstacle = previous["obstacle"] if previous else None
+            if obstacle and obstacle["holding"] and (
+                not previous_obstacle or not previous_obstacle["holding"]
+            ):
+                self.log("Obstacle hold")
             if bench["barcode"] is not None and (
                 previous is None or previous["barcode"] != bench["barcode"]
             ):
@@ -387,6 +393,14 @@ def show_sensors(data):
         st.info("Waiting for the first bench telemetry packet.")
         return
     line, imu = bench["line"], bench["imu_mg"]
+    peak_mm = bench["hump_peak_mm"]
+    obstacle = bench["obstacle"]
+    range_mm = obstacle["distance_mm"] if obstacle else None
+    range_text = f"{range_mm} mm" if range_mm is not None else "No echo"
+    scan_state = obstacle.get("scan_state") if obstacle else None
+    width_mm = obstacle.get("width_mm") if obstacle else None
+    if scan_state in {"measuring_forward", "coarse_sweep", "refining_edges", "recentring"}:
+        range_text = "Scanning"
     st.html('<div class="sensor-grid">' + "".join((
         panel("Line sensors", label(line["direction"]) if line["direction"] else "Unavailable", (
             ("Left level", ir_level(line["left_high"])),
@@ -397,6 +411,13 @@ def show_sensors(data):
         panel("Accelerometer", "Latest sample", tuple(
             (f"{axis.upper()} axis", f"{value:+d} mg") for axis, value in imu.items()
         )),
+        panel("Hump height", f"{peak_mm} mm" if peak_mm is not None else "Unavailable",
+              note="Highest estimate since GP20 start"),
+        panel("Forward range", range_text, (
+            ("Obstacle hold", "Active" if obstacle["holding"] else "Clear"),
+            ("Scan", label(scan_state) if scan_state else "Unavailable"),
+            ("Width", f"{width_mm} mm" if width_mm is not None else "Unavailable"),
+        )) if obstacle else panel("Forward range", "Unavailable"),
     )) + "</div>")
     if len(data["history"]) > 1:
         first = data["history"][0]["uptime_ms"]

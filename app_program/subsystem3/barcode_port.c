@@ -28,18 +28,7 @@
 #endif
 
 #define REG32(address) (*(volatile uint32_t *)(uintptr_t)(address))
-#define TIMER_BASE_ADDR 0x40054000UL
-#define TIMER_RAW_LOW (TIMER_BASE_ADDR + 0x28U)
-#define TIMER_ALARM_REG (TIMER_BASE_ADDR + 0x10U + 4U * BARCODE_TIMER_ALARM)
-#define TIMER_INTR_REG (TIMER_BASE_ADDR + 0x34U)
-#define TIMER_INTE_REG (TIMER_BASE_ADDR + 0x38U)
-#define TIMER_INTE_SET (TIMER_BASE_ADDR + 0x38U + 0x2000U)
-#define TIMER_INTE_CLR (TIMER_BASE_ADDR + 0x38U + 0x3000U)
-#define TIMER_ARMED_REG (TIMER_BASE_ADDR + 0x20U)
-#define NVIC_ISER_ADDR 0xe000e100UL
-#define NVIC_ICER_ADDR 0xe000e180UL
-#define NVIC_ICPR_ADDR 0xe000e280UL
-#define NVIC_IPR_ADDR 0xe000e400UL
+#define TIMER_ALARM_REG (TIMER_ALARM0 + 4U * BARCODE_TIMER_ALARM)
 #define ALARM_BIT (1UL << BARCODE_TIMER_ALARM)
 static uint32_t timer_ready __attribute__((aligned(4)));
 
@@ -50,15 +39,14 @@ bool barcode_port_is_ready(void)
 
 uint32_t barcode_port_now_us(void)
 {
-    return REG32(TIMER_RAW_LOW);
+    return rp2040_timer_us32();
 }
 uint16_t barcode_port_sensor_raw(void)
 {
     return (uint16_t)(REG32(ADC_RESULT) & 0x0FFFU);
 }
 
-/* Updated by the barcode timer on core 0; sampled by S5/heartbeat on
- * other cores.  Keep the published state in an aligned atomic word. */
+/* Updated only by the barcode timer. Heartbeat reads the published state. */
 static uint32_t sensor_high_state __attribute__((aligned(4)));
 static uint16_t recent_adc[BARCODE_AO_FILTER_SAMPLES];
 static uint16_t white_reference;
@@ -114,11 +102,11 @@ static void update_white_reference(uint16_t reading)
 
 bool barcode_port_sensor_high(void)
 {
-    /* The timer IRQ is owned by processor 1 (core 0).  Readers on the other
-     * core must not add extra samples or alter the adaptive filter. */
-    if (tk_get_prc() != 1)
-        return __atomic_load_n(&sensor_high_state, __ATOMIC_ACQUIRE) != 0U;
+    return __atomic_load_n(&sensor_high_state, __ATOMIC_ACQUIRE) != 0U;
+}
 
+bool barcode_port_sample_high(void)
+{
     const uint16_t reading = filtered_adc(barcode_port_sensor_raw());
     uint32_t high = __atomic_load_n(&sensor_high_state, __ATOMIC_RELAXED);
 
@@ -126,10 +114,11 @@ bool barcode_port_sensor_high(void)
     if (recent_count < BARCODE_AO_FILTER_SAMPLES)
         return high != 0U;
 
-    if (high == 0U)
-        update_white_reference(reading);
-
-    uint32_t entry = (uint32_t)white_reference + BARCODE_AO_ADAPTIVE_OFFSET;
+    /* Use the configured threshold until confirmed white is available.
+     * The first surface after RST may already be a black bar. */
+    uint32_t entry = white_reference_valid ?
+        (uint32_t)white_reference + BARCODE_AO_ADAPTIVE_OFFSET :
+        BARCODE_ADC_THRESHOLD;
     if (entry > 4095U)
         entry = 4095U;
     const uint32_t exit = entry > BARCODE_AO_HYSTERESIS
@@ -159,7 +148,7 @@ bool barcode_port_sensor_high(void)
         }
     }
 
-    if (high == 0U)
+    if (high == 0U && next_high == 0U)
         update_white_reference(reading);
 
     __atomic_store_n(&sensor_high_state, high, __ATOMIC_RELEASE);
@@ -180,8 +169,8 @@ ER barcode_port_timer_start(FP handler)
         return E_PAR;
     if (tk_get_prc() != 1)
         return E_CTX; /* NVIC/alarm owner is core 0. */
-    if (barcode_port_is_ready() || (REG32(TIMER_INTE_REG) & ALARM_BIT) != 0U ||
-        (REG32(TIMER_ARMED_REG) & ALARM_BIT) != 0U)
+    if (barcode_port_is_ready() || (in_w(TIMER_INTE) & ALARM_BIT) != 0U ||
+        (in_w(TIMER_ARMED) & ALARM_BIT) != 0U)
         return E_BUSY; /* Team must reserve this alarm; do not replace an active owner. */
     definition.intatr = TA_HLNG;
     definition.inthdr = handler;
@@ -199,21 +188,21 @@ ER barcode_port_timer_start(FP handler)
                     (2U << ADC_CS_AINSEL_POS) |
                     ADC_CS_START_MANY;
 
-    REG32(NVIC_ICER_ADDR) = ALARM_BIT;
-    REG32(TIMER_INTR_REG) = ALARM_BIT;
-    REG32(TIMER_INTE_SET) = ALARM_BIT;
-    *(volatile uint8_t *)(uintptr_t)(NVIC_IPR_ADDR + BARCODE_TIMER_ALARM) = 0xC0U;
+    out_w(NVIC_ICER(BARCODE_TIMER_ALARM), ALARM_BIT);
+    out_w(TIMER_INTR, ALARM_BIT);
+    set_w(TIMER_INTE, ALARM_BIT);
+    out_b(NVIC_IPR(BARCODE_TIMER_ALARM), 0xC0U);
     /* This template keeps RTOS-aware IRQs at priority 3, like PendSV/SysTick,
      * so a wakeup cannot interrupt the scheduler with a half-saved context. */
-    REG32(NVIC_ICPR_ADDR) = ALARM_BIT;
-    REG32(NVIC_ISER_ADDR) = ALARM_BIT;
+    out_w(NVIC_ICPR(BARCODE_TIMER_ALARM), ALARM_BIT);
+    out_w(NVIC_ISER(BARCODE_TIMER_ALARM), ALARM_BIT);
     arm_next();
     __atomic_store_n(&timer_ready, 1U, __ATOMIC_RELEASE);
     return E_OK;
 }
 void barcode_port_timer_ack_rearm(void)
 {
-    REG32(TIMER_INTR_REG) = ALARM_BIT;
+    out_w(TIMER_INTR, ALARM_BIT);
     arm_next();
 }
 void barcode_port_timer_stop(void)
@@ -221,10 +210,10 @@ void barcode_port_timer_stop(void)
     if (tk_get_prc() != 1 || !barcode_port_is_ready())
         return;
     __atomic_store_n(&timer_ready, 0U, __ATOMIC_RELEASE);
-    REG32(NVIC_ICER_ADDR) = ALARM_BIT;
-    REG32(TIMER_INTE_CLR) = ALARM_BIT;
-    REG32(TIMER_ARMED_REG) = ALARM_BIT;
-    REG32(TIMER_INTR_REG) = ALARM_BIT;
+    out_w(NVIC_ICER(BARCODE_TIMER_ALARM), ALARM_BIT);
+    clr_w(TIMER_INTE, ALARM_BIT);
+    out_w(TIMER_ARMED, ALARM_BIT);
+    out_w(TIMER_INTR, ALARM_BIT);
 
     /* Stop continuous conversions when barcode capture stops. */
     REG32(ADC_CS) = ADC_CS_EN | (2U << ADC_CS_AINSEL_POS);
@@ -256,8 +245,10 @@ ER barcode_port_read_encoder(barcode_encoder_snapshot_t *snapshot)
     const uint32_t sampled_at_us = barcode_port_now_us();
     motion_get_odometry(&left_ticks, &right_ticks);
 
-    /* Widen before adding. Both wheel counts use the same travel direction. */
-    snapshot->position_ticks = (uint32_t)(((int64_t)left_ticks + right_ticks) / 2);
+    /* Convert the two raw quadrature signs to vehicle-relative travel. */
+    const int64_t left_forward = (int64_t)left_ticks * ENCODER_LEFT_FORWARD_SIGN;
+    const int64_t right_forward = (int64_t)right_ticks * ENCODER_RIGHT_FORWARD_SIGN;
+    snapshot->position_ticks = (uint32_t)((left_forward + right_forward) / 2);
     snapshot->reset_epoch = 0U; /* Buddy 2's API requires no reset during a run. */
     snapshot->sampled_at_us = sampled_at_us;
     return E_OK;

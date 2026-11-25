@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <tk/tkernel.h>
 #include "drv_encoder.h"
+#include "../../config/sensor_calibration.h"
 
 /* RP2040 Hardware Register Base Addresses */
 #define RP2040_IO_BANK0_BASE   (0x40014000UL)
@@ -20,45 +21,50 @@
 #define PADS_GPIO_STRIDE       (4UL)
 
 /* Memory-mapped register accessors (NOTE: casts convert int addr to MMIO). */
+#define REG_SIO_CPUID \
+    (*(volatile uint32_t *)RP2040_SIO_BASE)
 #define REG_SIO_GPIO_IN \
     (*(volatile uint32_t *)(RP2040_SIO_BASE + 0x04UL))
 
 /* Corrected IO_BANK0 Interrupt Registers (Core 0 PROC0) */
 #define REG_IO_INTR0 \
     (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x0F0UL))
-#define REG_IO_INTR1 \
-    (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x0F4UL))
 #define REG_IO_INTR2 \
     (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x0F8UL))
 #define REG_IO_PROC0_INTE0 \
     (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x100UL))
 #define REG_IO_PROC0_INTS0 \
     (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x120UL))
-#define REG_IO_PROC0_INTS1 \
-    (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x124UL))
+#define IO_PROC0_INTE2         (RP2040_IO_BANK0_BASE + 0x108UL)
 #define REG_IO_PROC0_INTS2 \
     (*(volatile uint32_t *)(RP2040_IO_BANK0_BASE + 0x128UL))
 
 /* ARM Cortex-M0+ System Control & NVIC */
-#define REG_VTOR \
-    (*(volatile uint32_t *)(RP2040_PPB_BASE + 0xED08UL))
 #define REG_NVIC_ISER \
     (*(volatile uint32_t *)(RP2040_PPB_BASE + 0xE100UL))
 #define REG_NVIC_ICPR \
     (*(volatile uint32_t *)(RP2040_PPB_BASE + 0xE280UL))
 
 #define IO_IRQ_BANK0           (13U)
-#define VTOR_IRQ_OFFSET        (16U)
 #define GPIO_FUNC_SIO          (5UL)
 #define PAD_IE_PUE             ((1UL << 6U) | (1UL << 3U))
 #define PIN_ENC_LEFT_A         (1U)
 #define PIN_ENC_LEFT_B         (3U)
 #define PIN_ENC_RIGHT_A        (5U)
 #define PIN_ENC_RIGHT_B        (7U)
-#define PIN_US_ECHO            (17U)
-#define PIN_BANK_STRIDE        (16U)
+#define PINS_PER_INTR_WORD     (8U)
 #define BITS_PER_PIN_INTR      (4U)
 #define EDGE_BOTH_MASK         (0x0CUL)
+#define ECHO_EDGE_SHIFT        ((ULTRASONIC_ECHO_GPIO % PINS_PER_INTR_WORD) * BITS_PER_PIN_INTR)
+#define ECHO_IRQ_MASK          (EDGE_BOTH_MASK << ECHO_EDGE_SHIFT)
+#if (ULTRASONIC_ECHO_GPIO / PINS_PER_INTR_WORD) != 2U
+#error "The shared echo IRQ uses GPIO bank word 2 (GP16 through GP23)"
+#endif
+#define ENCODER_IRQ_EDGES(pin) (EDGE_BOTH_MASK << ((pin) * BITS_PER_PIN_INTR))
+#define LEFT_ENCODER_EDGES     (ENCODER_IRQ_EDGES(PIN_ENC_LEFT_A) | \
+                               ENCODER_IRQ_EDGES(PIN_ENC_LEFT_B))
+#define RIGHT_ENCODER_EDGES    (ENCODER_IRQ_EDGES(PIN_ENC_RIGHT_A) | \
+                               ENCODER_IRQ_EDGES(PIN_ENC_RIGHT_B))
 #define QUAD_TABLE_SIZE        (16U)
 #define QUAD_INDEX_MASK        (0x0FU)
 
@@ -67,6 +73,7 @@ static volatile int32_t g_left_ticks  = 0;
 static volatile int32_t g_right_ticks = 0;
 static volatile uint8_t g_left_prev   = 0U;
 static volatile uint8_t g_right_prev  = 0U;
+static uint32_t g_encoder_irq_edges;
 
 static int8_t const g_quad_lookup[QUAD_TABLE_SIZE] =
 {
@@ -94,7 +101,7 @@ __attribute__((weak)) void ultrasonic_echo_isr_handler (uint32_t events);
 /* ========================================================================= */
 
 /**
- * @brief Initialize quadrature encoder GPIO pins, pads, and IO_IRQ_BANK0 ISR.
+ * @brief Initialize quadrature encoder GPIO pins, pads, and counters.
  */
 void drv_encoder_init (void)
 {
@@ -121,26 +128,16 @@ void drv_encoder_init (void)
     /* Cast is safe: bitwise mask limits value to 2-bit range [0..3]. */
     g_right_prev = (uint8_t)(right_a | right_b);
 
-    /* Step 3: Enable edge transitions in GPIO peripheral. */
-    uint32_t const edge_mask =
-        (EDGE_BOTH_MASK << (PIN_ENC_LEFT_A * BITS_PER_PIN_INTR)) |
-        (EDGE_BOTH_MASK << (PIN_ENC_LEFT_B * BITS_PER_PIN_INTR)) |
-        (EDGE_BOTH_MASK << (PIN_ENC_RIGHT_A * BITS_PER_PIN_INTR)) |
-        (EDGE_BOTH_MASK << (PIN_ENC_RIGHT_B * BITS_PER_PIN_INTR));
+    __atomic_store_n(&g_encoder_irq_edges, 0U, __ATOMIC_RELAXED);
+    drv_encoder_reset();
+}
 
-    REG_IO_PROC0_INTE0 |= edge_mask;
-
-    /* Step 4: Clear pending interrupts. */
-    REG_NVIC_ICPR = (1UL << IO_IRQ_BANK0);
-
-    /* Step 5: Direct Vector Table Linkage in RAM. */
-    /* Cast converts 32-bit VTOR hardware address register into RAM pointer. */
-    uint32_t * const p_vtor = (uint32_t *)REG_VTOR;
-
-    if (NULL != p_vtor)
+ER drv_encoder_start_irq (void)
+{
+    /* The NVIC registers are local to this CPU. PROC0 must match. */
+    if (REG_SIO_CPUID != 0U)
     {
-        /* Cast converts function pointer to 32-bit ARM vector table word. */
-        p_vtor[VTOR_IRQ_OFFSET + IO_IRQ_BANK0] = (uint32_t)io_bank0_isr;
+        return E_CTX;
     }
 
     /* Cast converts ISR function pointer to uT-Kernel FP handler type. */
@@ -150,13 +147,27 @@ void drv_encoder_init (void)
         .inthdr = (FP)io_bank0_isr
     };
 
-    /* Cast to void intentionally ignores return value after vector link. */
-    (void)tk_def_int(IO_IRQ_BANK0, &dint);
-
-    /* Step 6: Unmask NVIC IRQ line 13. */
+    const ER result = tk_def_int(IO_IRQ_BANK0, &dint);
+    if (result != E_OK)
+    {
+        return result;
+    }
+    REG_IO_INTR0 = LEFT_ENCODER_EDGES | RIGHT_ENCODER_EDGES;
+    REG_NVIC_ICPR = (1UL << IO_IRQ_BANK0);
+    REG_IO_PROC0_INTE0 |= LEFT_ENCODER_EDGES | RIGHT_ENCODER_EDGES;
     REG_NVIC_ISER = (1UL << IO_IRQ_BANK0);
+    return E_OK;
+}
 
-    drv_encoder_reset();
+ER drv_encoder_enable_echo_irq(void)
+{
+    if (REG_SIO_CPUID != 0U)
+    {
+        return E_CTX;
+    }
+    REG_IO_INTR2 = ECHO_IRQ_MASK;
+    set_w(IO_PROC0_INTE2, ECHO_IRQ_MASK);
+    return E_OK;
 }
 
 /**
@@ -225,6 +236,26 @@ void drv_encoder_reset (void)
     g_right_ticks = 0;
 
     cpu_irq_restore(status);
+}
+
+static uint32_t encoder_edge_gpios (uint32_t edges)
+{
+    return ((edges & ENCODER_IRQ_EDGES(PIN_ENC_LEFT_A)) ? 1UL << PIN_ENC_LEFT_A : 0U) |
+           ((edges & ENCODER_IRQ_EDGES(PIN_ENC_LEFT_B)) ? 1UL << PIN_ENC_LEFT_B : 0U) |
+           ((edges & ENCODER_IRQ_EDGES(PIN_ENC_RIGHT_A)) ? 1UL << PIN_ENC_RIGHT_A : 0U) |
+           ((edges & ENCODER_IRQ_EDGES(PIN_ENC_RIGHT_B)) ? 1UL << PIN_ENC_RIGHT_B : 0U);
+}
+
+uint32_t drv_encoder_get_irq_gpios (void)
+{
+    return encoder_edge_gpios(__atomic_load_n(&g_encoder_irq_edges, __ATOMIC_RELAXED));
+}
+
+uint32_t drv_encoder_get_input_gpios (void)
+{
+    const uint32_t pending = REG_IO_INTR0;
+    const uint32_t handled = __atomic_load_n(&g_encoder_irq_edges, __ATOMIC_ACQUIRE);
+    return encoder_edge_gpios(pending | handled);
 }
 
 /**
@@ -317,15 +348,19 @@ static void io_bank0_isr (UINT dintno)
     (void)dintno;
 
     uint32_t const ints0   = REG_IO_PROC0_INTS0;
-    uint32_t const ints1   = REG_IO_PROC0_INTS1;
+    uint32_t const echo_edges = REG_IO_PROC0_INTS2 & ECHO_IRQ_MASK;
     uint32_t const gpio_in = REG_SIO_GPIO_IN;
 
-    /* Left Wheel Encoder (GP1, GP3) */
-    uint32_t const left_mask =
-        (EDGE_BOTH_MASK << (PIN_ENC_LEFT_A * BITS_PER_PIN_INTR)) |
-        (EDGE_BOTH_MASK << (PIN_ENC_LEFT_B * BITS_PER_PIN_INTR));
+    /* The single IRQ writer latches activity for the USB bench diagnostic. */
+    const uint32_t encoder_edges = ints0 & (LEFT_ENCODER_EDGES | RIGHT_ENCODER_EDGES);
+    const uint32_t seen = __atomic_load_n(&g_encoder_irq_edges, __ATOMIC_RELAXED);
+    if ((encoder_edges & ~seen) != 0U)
+    {
+        __atomic_store_n(&g_encoder_irq_edges, seen | encoder_edges, __ATOMIC_RELEASE);
+    }
 
-    if (0UL != (ints0 & left_mask))
+    /* Left Wheel Encoder (GP1, GP3) */
+    if (0UL != (ints0 & LEFT_ENCODER_EDGES))
     {
         uint32_t const left_a = ((gpio_in >> PIN_ENC_LEFT_A) & 1UL) << 1U;
         uint32_t const left_b = (gpio_in >> PIN_ENC_LEFT_B) & 1UL;
@@ -342,15 +377,11 @@ static void io_bank0_isr (UINT dintno)
         g_left_ticks += (int32_t)g_quad_lookup[idx & QUAD_INDEX_MASK];
         g_left_prev   = curr;
         /* Acknowledge and clear left encoder interrupt flags. */
-        REG_IO_INTR0  = left_mask;
+        REG_IO_INTR0  = ints0 & LEFT_ENCODER_EDGES;
     }
 
     /* Right Wheel Encoder (GP5, GP7) */
-    uint32_t const right_mask =
-        (EDGE_BOTH_MASK << (PIN_ENC_RIGHT_A * BITS_PER_PIN_INTR)) |
-        (EDGE_BOTH_MASK << (PIN_ENC_RIGHT_B * BITS_PER_PIN_INTR));
-
-    if (0UL != (ints0 & right_mask))
+    if (0UL != (ints0 & RIGHT_ENCODER_EDGES))
     {
         uint32_t const right_a = ((gpio_in >> PIN_ENC_RIGHT_A) & 1UL) << 1U;
         uint32_t const right_b = (gpio_in >> PIN_ENC_RIGHT_B) & 1UL;
@@ -367,18 +398,14 @@ static void io_bank0_isr (UINT dintno)
         g_right_ticks += (int32_t)g_quad_lookup[idx & QUAD_INDEX_MASK];
         g_right_prev   = curr;
         /* Acknowledge and clear right encoder interrupt flags. */
-        REG_IO_INTR0   = right_mask;
+        REG_IO_INTR0   = ints0 & RIGHT_ENCODER_EDGES;
     }
 
     /* Ultrasonic Echo (GP17) */
-    uint32_t const echo_mask =
-        (EDGE_BOTH_MASK << ((PIN_US_ECHO - PIN_BANK_STRIDE) *
-                            BITS_PER_PIN_INTR));
-
-    if (0UL != (ints1 & echo_mask))
+    if (echo_edges != 0U)
     {
-        REG_IO_INTR1 = echo_mask;
-        ultrasonic_echo_isr_handler(ints1 & echo_mask);
+        REG_IO_INTR2 = echo_edges;
+        ultrasonic_echo_isr_handler(echo_edges >> ECHO_EDGE_SHIFT);
     }
 }
 

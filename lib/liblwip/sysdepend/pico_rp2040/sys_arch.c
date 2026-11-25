@@ -9,8 +9,8 @@
  */
 
 /*
- * This file, unlike cyw43_utk.c, genuinely needs both worlds: tk_get_otm()/
- * tm_printf() from tk/tkernel.h, and lwip/sys.h's u32_t sys_now(void)
+ * This file needs both worlds: T-Kernel's board clock and tm_printf(),
+ * and lwip/sys.h's u32_t sys_now(void)
  * prototype. tk/syslib.h's own PROHIBIT_DEF_SIZE_T guard exists for exactly
  * this case -- it skips typedef'ing size_t from the kernel's SZ (both are
  * plain 32-bit integer types on this target, so this is not an ABI change),
@@ -24,17 +24,12 @@
 #include "lwip/sys.h"
 
 /*
- * tk_get_otm() returns the kernel's operating time as a {hi,lo} SYSTIM in
- * milliseconds since boot. lwIP only ever wants the low 32 bits -- u32_t
- * wraparound every ~49.7 days is the documented, accepted behaviour of
- * sys_now() on every lwIP port, not specific to this one.
+ * lwIP and MQTT use the same monotonic hardware uptime as the robot.
+ * sys_now() preserves the unsigned 32-bit millisecond wraparound.
  */
 u32_t sys_now(void)
 {
-	SYSTIM	otm;
-
-	tk_get_otm(&otm);
-	return (u32_t)otm.lo;
+	return (u32_t)rp2040_timer_ms32();
 }
 
 /*
@@ -46,11 +41,9 @@ u32_t sys_now(void)
 unsigned int lwip_utk_rand(void)
 {
 	static UW	state = 0;
-	SYSTIM		otm;
 
 	if(state == 0) {
-		tk_get_otm(&otm);
-		state = otm.lo ^ 0x9e3779b9u;
+		state = rp2040_timer_us32() ^ 0x9e3779b9u;
 		if(state == 0) state = 0x2545f491u;
 	}
 

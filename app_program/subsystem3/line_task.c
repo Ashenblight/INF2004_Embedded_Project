@@ -283,7 +283,6 @@ ER line_task_start(void)
 ER line_task_get_latest_tmo(line_task_status_t *status, TMO lock_timeout)
 {
     ER result;
-    SYSTIM now;
 
     if (status == NULL)
     {
@@ -300,13 +299,10 @@ ER line_task_get_latest_tmo(line_task_status_t *status, TMO lock_timeout)
     }
     *status = m_line_latest;
     result = tk_unl_mtx(m_line_mutex_id);
-    if ((result == E_OK) && ((status->packed & LINE_STATUS_VALID_MASK) != 0U))
+    if (result == E_OK && (status->packed & LINE_STATUS_VALID_MASK) != 0U &&
+        (rp2040_timer_ms32() - status->sample_time_ms) > LINE_STATUS_MAX_AGE_MS)
     {
-        result = tk_get_otm(&now);
-        if ((result < E_OK) || ((now.lo - status->sample_time_ms) > LINE_STATUS_MAX_AGE_MS))
-        {
-            status->packed &= (uint8_t)~LINE_STATUS_VALID_MASK;
-        }
+        status->packed &= (uint8_t)~LINE_STATUS_VALID_MASK;
     }
     return result;
 }
@@ -502,7 +498,6 @@ static void line_sample_task(INT stacd, void *exinf)
     line_task_status_t status = {0};
     line_sensor_readings_t raw;
     line_steering_t steering;
-    SYSTIM time;
     ER result;
     bool send_junction;
 
@@ -540,21 +535,17 @@ static void line_sample_task(INT stacd, void *exinf)
          */
         raw = line_following_read();
         steering = line_following_evaluate(raw);
-        if (tk_get_otm(&time) < E_OK)
-        {
-            (void)tk_unl_mtx(m_line_mutex_id);
-            break;
-        }
+        const uint32_t now_ms = rp2040_timer_ms32();
         if ((status.packed & LINE_STATUS_VALID_MASK) != 0U)
         {
             /* Unsigned subtraction also handles the low-word wrap. */
-            status.last_interval_ms = time.lo - status.sample_time_ms;
+            status.last_interval_ms = now_ms - status.sample_time_ms;
             if (status.last_interval_ms > status.max_interval_ms)
             {
                 status.max_interval_ms = status.last_interval_ms;
             }
         }
-        status.sample_time_ms = time.lo;
+        status.sample_time_ms = now_ms;
         status.sample_count = (uint16_t)(status.sample_count + 1U);
         status.packed = (uint8_t)((raw & LINE_SENSOR_LEVEL_MASK) |
                                   (m_line_latest.packed &
@@ -575,7 +566,7 @@ static void line_sample_task(INT stacd, void *exinf)
             {
                 ++m_line_crossing_id;
                 m_line_pending_event =
-                    (line_junction_event_t){m_line_crossing_id, m_line_generation, time.lo};
+                    (line_junction_event_t){m_line_crossing_id, m_line_generation, now_ms};
                 m_line_junction_pending = true;
             }
             m_line_junction_seen = true;

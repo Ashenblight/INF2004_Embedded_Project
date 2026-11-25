@@ -18,6 +18,9 @@
 #if BARCODE_GPIO_PIN != 28U
 #error "Use Grove 7 GP28 for barcode AO; GP26/27 are reserved for the IMU"
 #endif
+#if (BARCODE_ADC_THRESHOLD < 1U) || (4095U < BARCODE_ADC_THRESHOLD)
+#error "Barcode ADC threshold must be from 1 to 4095"
+#endif
 #if (BARCODE_CAPTURE_PERIOD_US == 0U) || \
     (BARCODE_CAPTURE_MAX_GAP_US < BARCODE_CAPTURE_PERIOD_US) || \
     (BARCODE_ENCODER_MAX_AGE_US == 0U)

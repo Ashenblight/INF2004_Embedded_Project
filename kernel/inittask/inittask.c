@@ -35,7 +35,12 @@ LOCAL void init_task_main(void);
 
 EXPORT const T_CTSK knl_init_ctsk = {
 	(void *)INITTASK_EXINF,		/* exinf */
+#if TK_SUPPORT_SMP
+	/* Platform startup configures peripherals routed to core 0. */
+	INITTASK_TSKATR | TA_ASSPRC,	/* tskatr */
+#else
 	INITTASK_TSKATR,		/* tskatr */
+#endif
 	(FP)&init_task_main,		/* task */
 	INITTASK_ITSKPRI,		/* itskpri */
 	INITTASK_STKSZ,			/* stksz */
@@ -43,6 +48,9 @@ EXPORT const T_CTSK knl_init_ctsk = {
 	INITTASK_DSNAME,		/* dsname */
 #endif
 	INITTASK_STACK,			/* bufptr */
+#if TK_SUPPORT_SMP
+	TP_PRC1,			/* assprc */
+#endif
 };
 
 /* --------------------------------------------------------------- */

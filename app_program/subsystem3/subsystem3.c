@@ -8,6 +8,9 @@
 #include "subsystem3.h"
 #include "../subsystem2/subsystem2.h"
 #include "../subsystem4/subsystem4.h"
+#ifndef APP_BARCODE_CAPTURE
+#define APP_BARCODE_CAPTURE 1
+#endif
 #if TM_MQTT
 #include "../../lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.h"
 #endif
@@ -55,7 +58,13 @@ EXPORT ER subsystem3_start(void)
 	ID tid = app_start_task(consumer_task, S3_PRI_CONSUMER, TP_PRC1,
 				"consumer_task");
 	ER result = (tid < E_OK) ? tid : line_task_start();
+#if APP_TEST || APP_BARCODE_CAPTURE
 	return (result < E_OK) ? result : barcode_task_start();
+#else
+	if (result == E_OK)
+		tm_printf((UB *)"[S3] Barcode capture paused for timing test.\n");
+	return result;
+#endif
 }
 
 /* Retained mailbox/statistics consumer. */

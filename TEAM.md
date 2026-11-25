@@ -60,12 +60,12 @@ fixed.
 | GP9 | | |
 | GP10 | | |
 | GP11 | | |
-| GP12 | | |
+| GP12 | S5 | Forward range servo, S1, PWM slice 6A |
 | GP13 | | |
 | GP14 | | |
 | GP15 | | |
-| GP16 | | |
-| GP17 | | |
+| GP16 | S5 | Ultrasonic trigger on Grove 4 |
+| GP17 | S5 | Ultrasonic echo on Grove 4, through the shared core-0 GPIO IRQ |
 | GP18 | | |
 | GP19 | *example:* S1 | external LED (LED + 330 Ω to GND) |
 | GP20 | | |

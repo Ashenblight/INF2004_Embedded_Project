@@ -300,7 +300,8 @@ void motion_set_mode_line_following (bool b_is_enabled);
 
 /**
  * @brief Update the shared lateral steering correction offset.
- * @param[in] steering_correction Signed lateral steering offset.
+ * @param[in] steering_correction Signed percentage of cruise target to
+ *            add to the left wheel and subtract from the right wheel.
  */
 void motion_update_steering (int8_t steering_correction);
 
@@ -326,6 +327,9 @@ void motion_reset_odometry (void);
  * @param[out] p_out_status Pointer to destination status structure.
  */
 void motion_get_status (motion_status_packed_t * const p_out_status);
+
+/* Core-0 bench diagnostic. Return and clear the longest control interval. */
+uint32_t motion_take_max_control_gap_us (void);
 
 /**
  * @brief Public getter for internal steering offset (used by unit tests).

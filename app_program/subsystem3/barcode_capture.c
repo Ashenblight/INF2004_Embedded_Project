@@ -113,7 +113,7 @@ static void timer_handler(UINT intno)
         raw_reset_seen = reset_request;
     }
 
-    high = barcode_port_sensor_high();
+    high = barcode_port_sample_high();
     black = (high == (BARCODE_BLACK_HIGH != 0U));
     now = barcode_port_now_us();
     record_raw(black, high, now);

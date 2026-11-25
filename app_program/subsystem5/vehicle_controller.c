@@ -4,6 +4,10 @@
 #include "../subsystem3/barcode_task.h"
 #include "../subsystem3/line_task.h"
 #include "../subsystem2/subsystem2.h"
+#include "../subsystem4/hump_height.h"
+#include "../../config/sensor_calibration.h"
+#include "ultrasonic.h"
+#include "obstacle_scan.h"
 
 /* Temporary barcode-only test. Set to 0 and rebuild for MQTT navigation. */
 #ifndef S5_BARCODE_BENCH_TEST
@@ -12,10 +16,11 @@
 
 #if !APP_TEST
 
-#define S5_BUTTON_PIN       20U
-#define S5_BUTTON_POLL_MS   10U
-#define S5_DEBOUNCE_SAMPLES 4U
+#define S5_BUTTON_PIN       ROBOT_START_BUTTON_GPIO
 #define S5_BARCODE_RESULT_WAIT_MS 250U
+
+static ID g_vehicle_cyclic_id;
+static uint32_t g_obstacle_holding;
 
 /* Buddy 2's API is optional in the standalone project template. */
 extern void motion_set_mode_line_following(bool enabled) __attribute__((weak));
@@ -29,6 +34,7 @@ typedef enum
 {
     VEHICLE_IDLE,
     VEHICLE_FOLLOWING,
+    VEHICLE_OBSTACLE_HOLD,
     VEHICLE_READING_JUNCTION,
     VEHICLE_TURNING,
     VEHICLE_REACQUIRING_LINE
@@ -73,6 +79,28 @@ static void disable_route_sensing(void)
 
 static bool start_line_following(vehicle_run_t *run)
 {
+    if (obstacle_scan_busy())
+    {
+        tm_printf((UB *)"[S5] Start blocked: obstacle scan in progress.\n");
+        return false;
+    }
+    if (ultrasonic_distance_mm() <= ULTRASONIC_STOP_DISTANCE_MM)
+    {
+        tm_printf((UB *)"[S5] Start blocked: obstacle in front.\n");
+        return false;
+    }
+    const bool rearming = run->phase == VEHICLE_OBSTACLE_HOLD;
+    if (rearming)
+    {
+        motion_status_packed_t motion;
+        motion_get_status(&motion);
+        if (motion.state != MOTION_STATE_STOPPED)
+        {
+            tm_printf((UB *)"[S5] Start blocked: braking is still in progress.\n");
+            return false;
+        }
+    }
+
     line_task_status_t status;
     if (E_OK != line_task_get_latest_tmo(&status, LINE_SAMPLE_PERIOD_MS) ||
         (status.packed & LINE_STATUS_VALID_MASK) == 0U)
@@ -103,16 +131,39 @@ static bool start_line_following(vehicle_run_t *run)
     barcode_task_reset_raw_trace();
     motion_set_mode_line_following(true);
     /* Zero selects Motion Control's built-in cruise speed. */
+    if (rearming)
+    {
+        motion_clear_emergency_stop();
+    }
     result = motion_start_continuous(0U);
     if (result != E_OK)
     {
+        if (rearming)
+        {
+            motion_emergency_stop();
+        }
         disable_route_sensing();
         tm_printf((UB *)"[S5] Motion rejected start (%d).\n", (INT)result);
         return false;
     }
 
+    imu_hump_begin_run();
+    obstacle_scan_reset();
+    __atomic_store_n(&g_obstacle_holding, 0U, __ATOMIC_RELEASE);
     tm_printf((UB *)"[S5] Line following started.\n");
     return true;
+}
+
+static vehicle_phase_t stop_for_obstacle(void)
+{
+    motion_emergency_stop();
+    disable_route_sensing();
+    imu_hump_end_run();
+    obstacle_scan_begin(rp2040_timer_ms32());
+    __atomic_store_n(&g_obstacle_holding, 1U, __ATOMIC_RELEASE);
+    tm_printf((UB *)"[S5] Obstacle at %u mm. Braking and holding.\n",
+              (UINT)ultrasonic_distance_mm());
+    return VEHICLE_OBSTACLE_HOLD;
 }
 
 static void request_vehicle_stop(void)
@@ -133,6 +184,10 @@ static vehicle_phase_t stop_vehicle(void)
 
 static vehicle_phase_t start_straight_crossing(void)
 {
+    if (ultrasonic_distance_mm() <= ULTRASONIC_STOP_DISTANCE_MM)
+    {
+        return stop_for_obstacle();
+    }
     /* S2 regulates cruise speed from the wheel encoders. Keep IR
      * steering disabled while leaving the junction. */
     motion_set_mode_line_following(false);
@@ -290,7 +345,7 @@ static vehicle_phase_t update_vehicle_run(vehicle_run_t *run, UW now_ms)
 static void vehicle_button_task(INT stacd, void *exinf)
 {
     bool stable_pressed = true, last_pressed = true;
-    unsigned int same_samples = 0U;
+    uint32_t changed_at_ms = rp2040_timer_ms32();
     vehicle_run_t run = {.phase = VEHICLE_IDLE};
     (void)stacd;
     (void)exinf;
@@ -298,8 +353,11 @@ static void vehicle_button_task(INT stacd, void *exinf)
         tm_printf((UB *)"[S5] Barcode bench: A=LEFT F=RIGHT Z=STRAIGHT; GP20 starts/stops; cross stops.\n");
     else
         tm_printf((UB *)"[S5] Receive the MQTT map, then press GP20 to start or stop.\n");
-    while (tk_dly_tsk(S5_BUTTON_POLL_MS) == E_OK)
+    tm_printf((UB *)"[S5] Forward sonar GP%u trigger/GP%u echo. Obstacle threshold=%u mm.\n",
+              ULTRASONIC_TRIGGER_GPIO, ULTRASONIC_ECHO_GPIO, ULTRASONIC_STOP_DISTANCE_MM);
+    while (tk_slp_tsk(TMO_FEVR) == E_OK)
     {
+        (void)tk_can_wup(TSK_SELF);
         if (motion_run_stop_latched())
         {
             disable_route_sensing();
@@ -307,17 +365,23 @@ static void vehicle_button_task(INT stacd, void *exinf)
             tm_printf((UB *)"[S5] Run ended. Reset the robot to rearm.\n");
             break;
         }
+        const uint32_t now_ms = rp2040_timer_ms32();
+        ultrasonic_poll(obstacle_scan_allows_ping(now_ms));
+        obstacle_scan_poll(now_ms);
+        if ((run.phase == VEHICLE_FOLLOWING || run.phase == VEHICLE_REACQUIRING_LINE) &&
+            ultrasonic_obstacle_detected())
+        {
+            run.phase = stop_for_obstacle();
+        }
 
         const bool pressed = gpio_get_val(S5_BUTTON_PIN) == 0U;
         bool new_press = false;
         if (pressed != last_pressed)
         {
             last_pressed = pressed;
-            same_samples = 1U;
+            changed_at_ms = now_ms;
         }
-        else if (same_samples < S5_DEBOUNCE_SAMPLES)
-            ++same_samples;
-        if (same_samples == S5_DEBOUNCE_SAMPLES && stable_pressed != pressed)
+        if (stable_pressed != pressed && now_ms - changed_at_ms >= ROBOT_BUTTON_DEBOUNCE_MS)
         {
             stable_pressed = pressed;
             new_press = pressed;
@@ -325,7 +389,7 @@ static void vehicle_button_task(INT stacd, void *exinf)
 
         if (new_press)
         {
-            if (VEHICLE_IDLE == run.phase)
+            if (run.phase == VEHICLE_IDLE || run.phase == VEHICLE_OBSTACLE_HOLD)
             {
                 if (start_line_following(&run))
                 {
@@ -337,36 +401,45 @@ static void vehicle_button_task(INT stacd, void *exinf)
                 tm_printf((UB *)"[S5] GP20 requested stop.\n");
                 const bool was_following = run.phase == VEHICLE_FOLLOWING;
                 run.phase = stop_vehicle();
+                imu_hump_end_run();
                 if (was_following)
                     barcode_task_request_raw_dump();
             }
             continue;
         }
-        if (VEHICLE_IDLE == run.phase)
+        if (run.phase == VEHICLE_IDLE || run.phase == VEHICLE_OBSTACLE_HOLD)
         {
             continue;
         }
-        SYSTIM now;
-        if (tk_get_otm(&now) != E_OK)
-        {
-            run.phase = stop_vehicle();
-            continue;
-        }
-        const vehicle_phase_t next_phase = update_vehicle_run(&run, now.lo);
+        const vehicle_phase_t next_phase = update_vehicle_run(&run, now_ms);
         if (run.phase != next_phase)
         {
             run.phase = next_phase;
-            run.phase_started_ms = now.lo;
+            run.phase_started_ms = now_ms;
+            if (next_phase == VEHICLE_IDLE)
+                imu_hump_end_run();
         }
     }
-    if (VEHICLE_IDLE != run.phase)
+    if (run.phase != VEHICLE_IDLE && run.phase != VEHICLE_OBSTACLE_HOLD)
     {
         request_vehicle_stop();
     }
+    imu_hump_end_run();
+    obstacle_scan_cancel();
+    CHECK(tk_del_cyc(g_vehicle_cyclic_id), "delete vehicle cyclic handler");
     tk_ext_tsk();
 }
 
 #endif
+
+bool vehicle_obstacle_holding(void)
+{
+#if APP_TEST
+    return false;
+#else
+    return __atomic_load_n(&g_obstacle_holding, __ATOMIC_ACQUIRE) != 0U;
+#endif
+}
 
 ER vehicle_controller_start(void)
 {
@@ -389,7 +462,8 @@ ER vehicle_controller_start(void)
     clr_w(GPIO(S5_BUTTON_PIN), GPIO_PDE);
     set_w(GPIO(S5_BUTTON_PIN), GPIO_PUE);
 
-    ID task = app_start_task((FP)vehicle_button_task, S5_PRI_MAIN, 0, "vehicle_button");
+    ID task = app_start_periodic_task((FP)vehicle_button_task, S5_PRI_MAIN, TP_PRC1,
+        "vehicle_button", ROBOT_CONTROL_PERIOD_MS, &g_vehicle_cyclic_id);
     return task < E_OK ? task : E_OK;
 #endif
 }

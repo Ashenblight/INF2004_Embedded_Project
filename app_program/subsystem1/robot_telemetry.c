@@ -4,14 +4,19 @@
 #include "../subsystem2/subsystem2.h"
 #include "../subsystem3/barcode_task.h"
 #include "../subsystem3/line_task.h"
+#include "../subsystem4/hump_height.h"
 #include "../subsystem4/imu_safety.h"
+#include "../subsystem5/obstacle_scan.h"
+#include "../subsystem5/vehicle_controller.h"
 
-#define TELEMETRY_HEADER         (0x18U)
+#define TELEMETRY_HEADER         (0x48U)
 #define TELEMETRY_LINE_MODE      (0x08U)
 #define TELEMETRY_RUN_STOP       (0x10U)
 #define TELEMETRY_MOTOR_FAULT    (0x20U)
 #define TELEMETRY_ENCODER_FAULT  (0x40U)
 #define TELEMETRY_STOP_TIMEOUT   (0x80U)
+#define TELEMETRY_RANGE_MASK    (0x7FFFU)
+#define TELEMETRY_OBSTACLE_HOLD (0x8000U)
 
 static bool g_telemetry_enabled;
 
@@ -59,6 +64,19 @@ bool robot_telemetry_encode(uint8_t payload[ROBOT_TELEMETRY_SIZE],
     payload[8] = (uint8_t)motion.right_delta_ticks;
     write_u32_le(&payload[9], imu_safety_get_telemetry());
     payload[13] = barcode_task_get_telemetry_letter();
+    const uint16_t peak_mm = imu_hump_peak_mm();
+    payload[14] = (uint8_t)peak_mm;
+    payload[15] = (uint8_t)(peak_mm >> 8U);
+    uint16_t range = obstacle_forward_range_mm() & TELEMETRY_RANGE_MASK;
+    if (vehicle_obstacle_holding())
+    {
+        range |= TELEMETRY_OBSTACLE_HOLD;
+    }
+    payload[16] = (uint8_t)range;
+    payload[17] = (uint8_t)(range >> 8U);
+    const uint16_t scan = obstacle_scan_status_word();
+    payload[18] = (uint8_t)scan;
+    payload[19] = (uint8_t)(scan >> 8U);
     return true;
 }
 #endif

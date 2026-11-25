@@ -12,6 +12,14 @@
 #include <tk/tkernel.h>		/* micro T-Kernel API (tk_xxx_yyy) */
 #include <tm/tmonitor.h>	/* T-Monitor API: tm_printf() console output */
 #include <bsp/libbsp.h>		/* Board helpers: gpio_set_pin/val, pwm_... */
+#include "../config/robot_timing.h"
+
+#if ROBOT_CONTROL_PERIOD_MS < CNF_TIMER_PERIOD || \
+    (ROBOT_CONTROL_PERIOD_MS % CNF_TIMER_PERIOD) != 0 || \
+    ROBOT_IMU_PERIOD_MS < CNF_TIMER_PERIOD || \
+    (ROBOT_IMU_PERIOD_MS % CNF_TIMER_PERIOD) != 0
+#error "Control and IMU periods must be positive multiples of the kernel tick"
+#endif
 
 /* ---------------------------------------------------------------------
  *  Pins: free for projects are GP0..GP22 and GP26..GP28.  GP0/GP1 are
@@ -30,6 +38,11 @@
 /* Create and start a task.  prc = TP_PRC1 (core 0), TP_PRC2 (core 1), or
    0 for "any core".  Defined in app_main.c. */
 IMPORT ID app_start_task(FP entry, PRI pri, UW prc, const char *name);
+
+/* Start a task that sleeps for a kernel cyclic wakeup. The task owns the
+   returned cyclic handler and deletes it before exiting. */
+IMPORT ID app_start_periodic_task(FP entry, PRI pri, UW prc, const char *name,
+                                  RELTIM period_ms, ID *cyclic_id);
 
 /* ---------------------------------------------------------------------
  *  Every subsystem provides these.  usermain() calls ALL the _init()

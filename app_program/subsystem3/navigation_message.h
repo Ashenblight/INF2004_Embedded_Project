@@ -70,7 +70,7 @@ typedef struct
 {
     uint16_t crossing_id;    /* Diagnostic modulo-65536 number. */
     uint32_t generation;     /* Line permission session; nonzero, never wraps. */
-    uint32_t detected_at_ms; /* tk_get_otm low word; unsigned elapsed checks. */
+    uint32_t detected_at_ms; /* Monotonic hardware uptime in milliseconds. */
 } line_junction_event_t;
 /* [version][CROSS_JUNCTION type][crossing ID BE16][generation BE32][time BE32] */
 bool line_junction_event_encode(uint8_t *bytes, unsigned capacity,
