@@ -15,6 +15,8 @@
 #define LINE_CENTRE_BLACK_HIGH    (1U)
 #endif
 
+/* Barcode sensor mode: 0 = DO, 1 = AO. */
+#define BARCODE_USE_AO            (0U)
 /* Barcode module AO on Grove 7 / GP28 (ADC2). */
 #define BARCODE_ADC_THRESHOLD     (800U)
 #define BARCODE_BLACK_HIGH        (1U)

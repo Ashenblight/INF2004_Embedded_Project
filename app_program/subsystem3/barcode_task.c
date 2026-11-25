@@ -5,6 +5,15 @@
 #include "barcode_config.h"
 #include "barcode_shared.h"
 #define INPUT_BYTES 13U
+#if BARCODE_USE_AO
+#define BARCODE_MODE_NAME "AO"
+#define BARCODE_RAW_NAME "ADC"
+#define BARCODE_TIME_DIAGNOSTIC "ao_time_diagnostic"
+#else
+#define BARCODE_MODE_NAME "DO"
+#define BARCODE_RAW_NAME "GPIO"
+#define BARCODE_TIME_DIAGNOSTIC "do_time_diagnostic"
+#endif
 static ID status_mutex, worker_id;
 static bool initialized, started;
 static barcode_task_status_t statistics;
@@ -109,7 +118,7 @@ static void print_raw_scan(void)
         return;
 
     const INT length = tm_sprintf(trace_text,
-        (UB *)"[S3 BARCODE RAW AO] runs=%u truncated=%u high_samples=%u low_samples=%u bars=%s widths_us=",
+        (UB *)"[S3 BARCODE RAW " BARCODE_MODE_NAME "] runs=%u truncated=%u high_samples=%u low_samples=%u bars=%s widths_us=",
         (UINT)trace.count, (UINT)trace.truncated, (UINT)trace.high_samples,
         (UINT)trace.low_samples, trace.count == 0U ? "none" : trace.bits);
     print_trace_widths(length, trace.widths_us, trace.count);
@@ -118,7 +127,8 @@ static void print_raw_scan(void)
      * Never publish this diagnostic guess as a vehicle navigation command. */
     optical_guess = barcode_guess_runs(trace.widths_us, trace.count,
                                       trace.truncated, active_letter_mask());
-    print_confidence("ao_time_diagnostic", "junction", &optical_guess, trace.count);
+    print_confidence(BARCODE_TIME_DIAGNOSTIC, "junction",
+                 &optical_guess, trace.count);
 
     /* Report the same matcher on the encoder widths collected by the production
      * decoder. With fewer than 29 completed elements, this is only a hint. */
@@ -239,8 +249,18 @@ static void barcode_worker(INT stacd, void *exinf)
         return;
     }
 
+    #if BARCODE_USE_AO
+
     tm_printf((UB *)"[S3 BARCODE] AO GP%u boot ADC threshold=%u; encoder-distance decoding; sample=%u us\n",
-              BARCODE_GPIO_PIN, (UINT)BARCODE_ADC_THRESHOLD, BARCODE_CAPTURE_PERIOD_US);
+              BARCODE_GPIO_PIN, (UINT)BARCODE_ADC_THRESHOLD,
+              BARCODE_CAPTURE_PERIOD_US);
+
+    #else
+
+        tm_printf((UB *)"[S3 BARCODE] DO GP%u; encoder-distance decoding; sample=%u us\n",
+              BARCODE_GPIO_PIN, BARCODE_CAPTURE_PERIOD_US);
+
+    #endif
 
     for (;;)
     {
@@ -249,7 +269,8 @@ static void barcode_worker(INT stacd, void *exinf)
         if (now_us - last_adc_print_us >= 250000U)
         {
             last_adc_print_us = now_us;
-            tm_printf((UB *)"[S3 BARCODE ADC] raw=%u\n", (UINT)barcode_port_sensor_raw());
+            tm_printf((UB *)"[S3 BARCODE " BARCODE_RAW_NAME "] raw=%u\n",
+          (UINT)barcode_port_sensor_raw());
         }
 
         const uint32_t faults = barcode_capture_take_faults();

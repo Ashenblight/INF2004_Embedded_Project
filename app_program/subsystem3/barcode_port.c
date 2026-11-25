@@ -2,7 +2,9 @@
  * Host tests use host_barcode_port.c instead of this implementation. */
 #include "barcode_port.h"
 #include "barcode_config.h"
+#if BARCODE_USE_AO
 #include "../../device/adc/sysdepend/rp2040/adc_sysdep.h"
+#endif
 
 /* AO filtering adapted from the teammate's scanner: a short multi-sample
  * filter, white-paper reference tracking, and hysteresis.
@@ -43,11 +45,17 @@ uint32_t barcode_port_now_us(void)
 }
 uint16_t barcode_port_sensor_raw(void)
 {
-    return (uint16_t)(REG32(ADC_RESULT) & 0x0FFFU);
+    #if BARCODE_USE_AO
+        return (uint16_t)(REG32(ADC_RESULT) & 0x0FFFU);
+    #else
+        return (uint16_t)(gpio_get_val(BARCODE_GPIO_PIN) != 0U);
+    #endif
 }
 
 /* Updated only by the barcode timer. Heartbeat reads the published state. */
 static uint32_t sensor_high_state __attribute__((aligned(4)));
+
+#if BARCODE_USE_AO
 static uint16_t recent_adc[BARCODE_AO_FILTER_SAMPLES];
 static uint16_t white_reference;
 static uint8_t recent_count, recent_next;
@@ -99,7 +107,7 @@ static void update_white_reference(uint16_t reading)
             ((uint32_t)reading - white_reference) / 16U);
     }
 }
-
+#endif
 bool barcode_port_sensor_high(void)
 {
     return __atomic_load_n(&sensor_high_state, __ATOMIC_ACQUIRE) != 0U;
@@ -107,7 +115,8 @@ bool barcode_port_sensor_high(void)
 
 bool barcode_port_sample_high(void)
 {
-    const uint16_t reading = filtered_adc(barcode_port_sensor_raw());
+    #if BARCODE_USE_AO
+        const uint16_t reading = filtered_adc(barcode_port_sensor_raw());
     uint32_t high = __atomic_load_n(&sensor_high_state, __ATOMIC_RELAXED);
 
     /* Wait for a full short window before learning white / changing state. */
@@ -153,6 +162,16 @@ bool barcode_port_sample_high(void)
 
     __atomic_store_n(&sensor_high_state, high, __ATOMIC_RELEASE);
     return high != 0U;
+    #else
+
+    const uint32_t high =
+        (gpio_get_val(BARCODE_GPIO_PIN) != 0U) ? 1U : 0U;
+
+    __atomic_store_n(&sensor_high_state, high, __ATOMIC_RELEASE);
+
+    return high != 0U;
+
+#endif
 }
 static void arm_next(void)
 {
@@ -172,21 +191,37 @@ ER barcode_port_timer_start(FP handler)
     if (barcode_port_is_ready() || (in_w(TIMER_INTE) & ALARM_BIT) != 0U ||
         (in_w(TIMER_ARMED) & ALARM_BIT) != 0U)
         return E_BUSY; /* Team must reserve this alarm; do not replace an active owner. */
+    #if !BARCODE_USE_AO
+        result = gpio_set_pin(BARCODE_GPIO_PIN, GPIO_MODE_IN);
+        if (result != E_OK)
+            return result;
+    #endif
     definition.intatr = TA_HLNG;
     definition.inthdr = handler;
     result = tk_def_int(BARCODE_TIMER_ALARM, &definition);
     if (result != E_OK)
         return result;
 
-    /* GP28 / ADC2 is configured by the ADC pin-init device setting. */
-    __atomic_store_n(&sensor_high_state, 0U, __ATOMIC_RELAXED);
-    recent_count = recent_next = 0U;
-    pending_count = pending_high = 0U;
-    white_reference = 0U;
-    white_reference_valid = false;
-    REG32(ADC_CS) = ADC_CS_EN |
-                    (2U << ADC_CS_AINSEL_POS) |
-                    ADC_CS_START_MANY;
+    #if BARCODE_USE_AO
+
+        /* GP28 / ADC2 is configured by the ADC pin-init device setting. */
+        __atomic_store_n(&sensor_high_state, 0U, __ATOMIC_RELAXED);
+        recent_count = recent_next = 0U;
+        pending_count = pending_high = 0U;
+        white_reference = 0U;
+        white_reference_valid = false;
+
+        REG32(ADC_CS) = ADC_CS_EN |
+                        (2U << ADC_CS_AINSEL_POS) |
+                        ADC_CS_START_MANY;
+
+    #else
+
+        __atomic_store_n(&sensor_high_state,
+                        (gpio_get_val(BARCODE_GPIO_PIN) != 0U) ? 1U : 0U,
+                        __ATOMIC_RELAXED);
+
+    #endif
 
     out_w(NVIC_ICER(BARCODE_TIMER_ALARM), ALARM_BIT);
     out_w(TIMER_INTR, ALARM_BIT);
@@ -216,8 +251,12 @@ void barcode_port_timer_stop(void)
     out_w(TIMER_INTR, ALARM_BIT);
 
     /* Stop continuous conversions when barcode capture stops. */
-    REG32(ADC_CS) = ADC_CS_EN | (2U << ADC_CS_AINSEL_POS);
-    (void)tk_def_int(BARCODE_TIMER_ALARM, NULL);
+    #if BARCODE_USE_AO
+        /* Stop continuous conversions when barcode capture stops. */
+        REG32(ADC_CS) = ADC_CS_EN | (2U << ADC_CS_AINSEL_POS);
+    #endif
+
+        (void)tk_def_int(BARCODE_TIMER_ALARM, NULL);
 }
 UW barcode_port_enter_critical(void)
 {

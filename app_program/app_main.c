@@ -299,7 +299,7 @@ EXPORT INT usermain(void)
         {
             tm_sprintf(width_text, (UB *)"%u", (UINT)width_mm);
         }
-        tm_printf((UB *)"[HEARTBEAT] Pico alive (#%u) direction=%s barcode_ao=%s barcode_edges=%u"
+        tm_printf((UB *)"[HEARTBEAT] Pico alive (#%u) direction=%s barcode_level=%s barcode_edges=%u"
                         " hump_peak_mm=%s hump_raw_peak_mm=%s hump_left_ticks=%d"
                         " enc_irq_gp1_gp3=%u%u enc_irq_gp5_gp7=%u%u"
                         " enc_in_gp1_gp3=%u%u enc_right_ticks=%d imu_stop=%s"
