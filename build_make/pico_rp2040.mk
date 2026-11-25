@@ -91,6 +91,18 @@ ifeq ($(TEST),1)
 TEST_SUFFIX := _test
 endif
 
+# Full course run uses the received MQTT map and leaves the junction after reading.
+COURSE_RUN ?= 0
+ifneq ($(filter $(COURSE_RUN),0 1),$(COURSE_RUN))
+$(error Unknown COURSE_RUN '$(COURSE_RUN)'; use 0 or 1)
+endif
+ifeq ($(COURSE_RUN),1)
+ifneq ($(MQTT),1)
+$(error COURSE_RUN=1 requires MQTT=1)
+endif
+COURSE_SUFFIX := _course
+endif
+
 # Stationary servo diagnostic. Keep its UF2 separate from the driving image.
 SERVO_TEST ?= 0
 ifneq ($(filter $(SERVO_TEST),0 1),$(SERVO_TEST))
@@ -123,6 +135,11 @@ endif
 ifeq ($(BARCODE_CAPTURE),0)
 BARCODE_SUFFIX := _barcode_off
 endif
+ifeq ($(COURSE_RUN),1)
+ifneq ($(TEST)$(SERVO_TEST)$(TURN_TEST)$(BARCODE_CAPTURE),0001)
+$(error COURSE_RUN=1 requires barcode capture and a normal driving build)
+endif
+endif
 
 # CRASH_REPORT=1 also copies every console line to UART0 on GP0 (TX) /
 # GP1 (RX), 115200 8N1.  UART output is sent immediately, so it still shows
@@ -149,7 +166,7 @@ endif
 # a live hazard: an SMP=1 build was once flashed in place of an SMP=0 one and
 # only the banner in the log revealed it.
 #
-EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(NET_SUFFIX)$(MQTT_SUFFIX)$(CRASH_SUFFIX)$(TEST_SUFFIX)$(BARCODE_SUFFIX)$(SERVO_TEST_SUFFIX)$(TURN_TEST_SUFFIX)
+EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(NET_SUFFIX)$(MQTT_SUFFIX)$(CRASH_SUFFIX)$(TEST_SUFFIX)$(BARCODE_SUFFIX)$(SERVO_TEST_SUFFIX)$(TURN_TEST_SUFFIX)$(COURSE_SUFFIX)
 
 GCC := arm-none-eabi-gcc
 AS := arm-none-eabi-gcc

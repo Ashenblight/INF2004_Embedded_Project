@@ -24,6 +24,27 @@ make -j8 NET=lwip MQTT=1
 
 Flash `build_make/mtk3pico_smp1_usb_cdc_wifi_lwip_mqtt.uf2` with BOOTSEL. Wait for `wifi: link up` and `mqtt: connected to` in USB serial at 115200 baud.
 
+## Run the full course
+
+Build the course image from WSL in `build_make`.
+
+```sh
+make -j8 NET=lwip MQTT=1 COURSE_RUN=1
+```
+
+Flash `mtk3pico_smp1_usb_cdc_wifi_lwip_mqtt_course.uf2`. The course controller waits for an MQTT barcode map before GP20 starts motion and continues after stopping to read a junction. The ordinary MQTT image uses the local bench map and the junction hold setting from `config/sensor_calibration.h`.
+
+Publish the team's confirmed map to `mtk3smp-pico/cmd/test` after the Pico connects. The packet begins with hex `17` and a one-byte revision, followed by three or four entries. Each entry is `(letter_index << 3) | action`, with A=0 through Z=25 and actions left=1, right=2, straight=3, U-turn=4. This WSL example sends the bench A/F/Z map. Use the entries for the actual course during the demo.
+
+```sh
+python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex("17 00 01 2a cb"))' \
+  | mosquitto_pub -h BROKER_IP -p 1883 -q 1 -t mtk3smp-pico/cmd/test -s
+```
+
+Check for `mqtt: mapping applied (result=0)` on USB before pressing GP20. Resend the map after a Pico reset. Use the [system test log](../testing/system/TEST_LOG.md) for the full run.
+
+On approach, the barcode worker decodes the frame and the controller logs `Cached barcode` for the first mapped result. The next junction stop consumes that command once after a fresh 100 ms active brake hold. Left and right use the calibrated balanced pivot, and a U-turn uses two right pivots. At an unmarked junction, the car waits up to two seconds from detection for a decoded command, then continues straight when braking has completed and the path is clear. A cached command survives a bypass on the same approach.
+
 ## Open the dashboard
 
 From the project root on the laptop, install the dashboard dependencies in your Python environment, then launch it with the same broker configured on the Pico.
@@ -85,20 +106,31 @@ The startup message `[ENC] GPIO IRQ ready on core 0.` confirms boot installed th
 ## Test obstacle detection and stopping
 
 1. Use Grove 4 with `TRIG` on GP16, `ECHO` on GP17, and common ground. For the lab's HC-SR04P, use the Grove 3.3 V supply. A standard 5 V HC-SR04 needs a 5 V supply and a level-shifted echo to GP17. Face the sensor straight ahead.
-2. With the car still, place a flat target 150 to 200 mm from the sensor face. Verify `range_mm` over USB or **Sensors → Forward range** in the dashboard. `ULTRASONIC_RANGE_BIAS_MM` in `config/sensor_calibration.h` sets how much to subtract from the measured range. The heartbeat shows `no_echo` when the latest ping returned no usable distance.
-3. Put the target across a straight section of track and start about 200 mm away with GP20. The firmware pings at least 70 ms apart and brakes after two consecutive calibrated readings within `ULTRASONIC_STOP_DISTANCE_MM` in `config/sensor_calibration.h` (150 mm default). Check for `[S5] Obstacle at ... mm. Braking and holding.`, `obstacle_hold=1` and stationary wheels. Record the final clearance from the sensor face.
+2. With the car still, place a flat target 150 to 200 mm from the sensor face. Verify `range_mm` over USB or **Sensors → Forward range** in the dashboard. `ULTRASONIC_RANGE_OFFSET_MM` in `config/sensor_calibration.h` is the signed correction added to valid readings. The heartbeat shows `no_echo` when the latest ping returned no usable distance.
+3. Put the target across a straight section of track and start about 200 mm away with GP20. The firmware pings at least 70 ms apart and brakes after two consecutive calibrated readings within `ULTRASONIC_STOP_DISTANCE_MM` in `config/sensor_calibration.h`. Check for `[S5] Obstacle at ... mm. Braking and holding.`, `obstacle_hold=1` and stationary wheels. Record the final clearance from the sensor face.
 4. Wait for the obstacle width scan to finish. Remove the target and verify that the car stays stopped. Press GP20 to start a fresh run. If you lift the car and the IMU latches the end of the run, reset flat before starting again.
 
 ## Test obstacle width
 
-1. Plug the sonar servo into **S1 (GP12)**. Reset on flat ground and check that the sensor faces straight ahead at the configured `OBSTACLE_SERVO_CENTRE_US` (1500 µs). Set the horn position or trim the centre in `config/sensor_calibration.h`. `OBSTACLE_SERVO_US_PER_DEGREE` controls the commanded angle scale. `OBSTACLE_SERVO_DIRECTION` controls which direction the servo turns for positive angles. If the sensor face sits ahead of the servo shaft, measure that distance and set `OBSTACLE_SENSOR_PIVOT_OFFSET_MM`.
+1. Plug the sonar servo into **S1 (GP12)**. Reset on flat ground and check that the sensor faces straight ahead at the configured `OBSTACLE_SERVO_CENTRE_US`. Set the horn position or trim the centre in `config/sensor_calibration.h`. `OBSTACLE_SERVO_US_PER_DEGREE` controls the commanded angle scale. `OBSTACLE_SERVO_DIRECTION` controls which direction the servo turns for positive angles. `OBSTACLE_AXLE_TO_SERVO_MM` is 65 mm from the driven axle midpoint to the servo shaft on this car. If the sensor face sits ahead of the shaft, measure that distance separately and set `OBSTACLE_SENSOR_PIVOT_OFFSET_MM`.
 2. Set `OBSTACLE_SERVO_SWEEP_LIMIT_DEG` to the nominal travel available on each side of centre. The current 10° setting limits both the driving build and the stationary `SERVO_TEST=1` build. Check the actual swing in the stationary build and adjust the centre or angle scale to fit the mount.
-3. Place a box of known width square to the car and centred over a straight section of track. Run the GP20 approach from about 200 mm. After both encoders stay unchanged for 120 ms, the scan steps outward within the configured limit and refines each edge bracket to 1°. Each angle waits for settling and uses repeatable echoes. If an edge is beyond the servo limit, the width is unavailable.
-4. Keep the target in place until the servo returns to centre and serial prints `[S5 SCAN] Obstacle width=... mm. Holding.` Compare that number with a ruler and the width under **Sensors → Forward range** in the dashboard. Restart a running dashboard to load the new packet decoder. Record the stopping range and both edge logs along with the width to calibrate angle or mounting errors.
+3. Place a box of known width square to the car and centred over a straight section of track. Run the GP20 approach from about 200 mm with clearance for the car to pivot 30° to either side. After braking and 120 ms of unchanged encoder counts, the servo checks both sides with the chassis still. If it still sees the box at the servo limit, the chassis extends the sweep on that side in steps of up to 10° to a 30° limit. When both sides need an extended sweep, the left goes first. Motion control brakes each wheel at its encoder target. The scanner validates the turn before taking fresh echoes. If the inward angle misses after a pivot, the scanner checks the rest of the servo sweep in 5° steps. If the whole view misses, it can retry from an intermediate chassis heading once per side. GP20 cancels a chassis-assisted scan and requires realignment and reset. The IMU pickup stop remains active.
+4. Keep the box in place until the chassis and servo face forward again and serial prints `[S5 SCAN] Obstacle width=... mm. Holding.` Compare that number with the measured box width and the value under **Sensors → Forward range** in the dashboard. The scan counts an angled echo as part of the box when its projected depth is within `OBSTACLE_SCAN_FACE_TOLERANCE_MM` of the straight-ahead reference. The reference log prints the active tolerance. At the chassis and servo limits, a continuing echo prompts a second sweep in 2° steps to check for an earlier edge. A small encoder change of up to five ticks per wheel from the settled pose discards the current angle's readings and waits for fresh readings. Larger movement aborts the sweep. The heartbeat retains the scan state and failure reason in `obstacle_scan` and `obstacle_scan_error`. Save the `[S5 SCAN]` lines for the reference, rejected echoes, and both edges. Repeat with the box shifted left and right while it still crosses the forward sonar beam, then with a second measured width at the same stopping distance.
+
+## Test obstacle bypass and line recovery
+
+With `OBSTACLE_BYPASS_ENABLED=1`, a valid width scan starts an automatic detour. The firmware uses the measured 130 mm wheel-to-wheel width and an initial distance scale of 11 ticks per mm. Check the two provisional measurements in `config/sensor_calibration.h`. The axle-to-IR distance is set to 65 mm. The radius from the driven axle midpoint to the furthest part of the car is set to 135 mm.
+
+1. Start with a measured box across a straight line and about 500 mm of clear space on each side of the line. Leave straight tape beyond the box for the return. Keep GP20 accessible.
+2. The car checks the shorter detour side first, then tries the other side if sonar detects a blockage. Watch the `[S5 BYPASS]` logs for the outward leg, the parallel moves, and the clearance checks toward the line. `OBSTACLE_BYPASS_ALONG_STEP_MM` sets the advance between blocked checks. Set `OBSTACLE_BYPASS_REQUIRE_SECOND_CLEAR` to 1 to make a second check after travelling `OBSTACLE_BYPASS_AFTER_CLEAR_MM`. This distance must cover the measured turning radius. Set it to 0 to return at the first clear position and check that there is room for the final turn there.
+3. Look for `Track stripe detected` or `Wide junction patch detected`, then `Original line rejoined. Moving forward to resume line following.` and `[S5] Line following resumed.` The robot centres the axle on a normal tape stripe using its measured edges and the axle-to-IR distance. If a wide patch covers both IR sensors in the expected return window, it uses the measured outbound shift to align the axle. After turning forward and checking clearance, it drives through the markings and resumes IR steering once the sensors clear the double-black pattern.
+4. To approach a box just beyond a junction from upstream, set `ROBOT_HOLD_AT_JUNCTION=0`. The robot stops to read the junction, executes the route, and continues. Confirm that GP20 or pickup stops motion during a controlled bypass trial.
+
+Set `OBSTACLE_BYPASS_ENABLED=0` for a stationary width test. Set `ROBOT_HOLD_AT_JUNCTION=1` to stay stopped after the junction read. The two settings are independent.
 
 ## Test a point turn
 
-For a chassis-assisted scan, verify the point-turn calibration first. Build `make -j8 WIFI=none TURN_TEST=1` in `build_make` and flash `mtk3pico_smp1_usb_cdc_turn_test.uf2`. Start flat on a clear floor. Each GP20 press commands one 90° point turn. The first turn is right and the second is left. Compare each actual turn with a paper corner and record the matching `[TURN TEST]` encoder deltas. The scale of 11 ticks per degree comes from the 90° hand pivots, treating the counts as relative to the straight heading. Restore the normal MQTT UF2 for line and obstacle tests.
+To verify the point-turn calibration for the chassis-assisted scan and barcode junctions, build `make -j8 WIFI=none TURN_TEST=1` in `build_make` and flash `mtk3pico_smp1_usb_cdc_turn_test.uf2`. Start flat on a clear floor. GP20 alternates the calibrated right and left commands from `sensor_calibration.h`. The test uses the same balanced wheel routine and duty as barcode turns. Compare each turn with a paper corner and record the matching `[TURN TEST]` encoder deltas. The base scale of 11 ticks per degree comes from the 90° hand pivots. Restore the normal MQTT UF2 for line and obstacle tests.
 
 ## Packet layout
 
@@ -115,4 +147,4 @@ The bench topic publishes a 20-byte version 4 frame at QoS 0 with little-endian 
 | 13 | Latest completed barcode scan. `0` pending, `1`–`26` A–Z. The viewer also accepts older firmware's `31` unknown value. |
 | 14–15 | Unsigned 16-bit run peak in millimetres. `0xFFFF` means unavailable. |
 | 16–17 | Forward range in millimetres in bits 0–14, with `0x7FFF` for no usable echo. Bit 15 is set while the controller holds for an obstacle. |
-| 18–19 | Obstacle width in millimetres in bits 0–11, with `0xFFF` for unavailable. Bits 12–15 give scan state `0` idle, `1` waiting for wheels, `2` measuring forward, `3` coarse sweep, `4` refining edges, `5` recentring, `6` complete, or `7` failed. |
+| 18–19 | Obstacle width in millimetres in bits 0–11, with `0xFFF` for unavailable. Bits 12–15 give scan state `0` idle, `1` waiting for wheels, `2` measuring forward, `3` coarse sweep, `4` refining edges, `5` recentring, `6` complete, `7` failed, or `8` pivoting. |

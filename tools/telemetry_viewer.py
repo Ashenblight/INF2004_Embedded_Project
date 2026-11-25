@@ -13,7 +13,7 @@ DIRECTIONS = ("STRAIGHT", "LEFT", "RIGHT", "CROSS_JUNCTION")
 MOTION_STATES = ("IDLE", "CONTINUOUS", "MANOEUVRE", "STOPPING", "STOPPED", "FAULT")
 STOP_REASONS = ("none", "pickup", "overturn", "sensor_error")
 SCAN_STATES = ("idle", "waiting_for_wheels", "measuring_forward", "coarse_sweep",
-               "refining_edges", "recentring", "complete", "failed")
+               "refining_edges", "recentring", "complete", "failed", "pivoting")
 
 
 def acceleration_mg(word, shift):

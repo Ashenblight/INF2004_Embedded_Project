@@ -69,7 +69,8 @@ typedef struct
     uint32_t speed_duty         : 7;  /* Store 7-bit duty cycle [0..100]. */
     uint32_t target_angle_deg   : 9;  /* Store 9-bit signed angle. */
     uint32_t target_distance_mm : 10; /* Store 10-bit distance [0..1023]. */
-    uint32_t reserved           : 4;  /* Reserve 4 bits of padding. */
+    uint32_t balance_wheels     : 1;  /* Manoeuvre with per-wheel encoder targets. */
+    uint32_t reserved           : 3;
 } __attribute__((packed)) subsystem2_command_packed_t;
 
 typedef subsystem2_command_packed_t motion_command_packed_t;
@@ -201,6 +202,9 @@ IMPORT ER subsystem2_start (void);
  */
 ER motion_move_forward (uint16_t distance_mm, uint8_t speed_duty);
 
+/* Bypass leg using its measured distance scale and a target per wheel. */
+ER motion_bypass_move_forward (uint16_t distance_mm, uint8_t speed_duty);
+
 /**
  * @brief Enqueue a discrete backward movement command.
  * @param[in] distance_mm Target reverse distance in millimetres (0-1023).
@@ -216,6 +220,9 @@ ER motion_move_backward (uint16_t distance_mm, uint8_t speed_duty);
  * @return E_OK on success, or uT-Kernel error code.
  */
 ER motion_point_turn (int16_t angle_deg, uint8_t speed_duty);
+
+/* Use one target per wheel for short pivots supervised by the obstacle scanner. */
+ER motion_balanced_point_turn (int16_t angle_deg, uint8_t speed_duty);
 
 /**
  * @brief Enqueue a continuous forward cruise command.

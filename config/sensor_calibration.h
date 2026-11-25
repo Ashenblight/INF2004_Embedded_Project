@@ -26,10 +26,12 @@
 /* Forward ultrasonic sensor on Grove 4. Measured from the sensor face. */
 #define ULTRASONIC_TRIGGER_GPIO     (16U)
 #define ULTRASONIC_ECHO_GPIO        (17U)
-#define ULTRASONIC_STOP_DISTANCE_MM (150U)
-/* Subtract the measured positive range bias near the bench stop distance. */
-#define ULTRASONIC_RANGE_BIAS_MM     (0U)
+#define ULTRASONIC_STOP_DISTANCE_MM (180U)
+/* Signed offset added to valid ultrasonic readings, in millimetres. */
+#define ULTRASONIC_RANGE_OFFSET_MM  (0)
 #define ROBOT_START_BUTTON_GPIO    (20U)
+/* 1 holds after reading the junction. 0 stops, then follows the route instruction. */
+#define ROBOT_HOLD_AT_JUNCTION     (0)
 
 /* Robo Pico S1 servo. Calibrate with the sensor pointing straight ahead. */
 #define OBSTACLE_SERVO_GPIO           (12U)
@@ -40,16 +42,42 @@
 #define OBSTACLE_SERVO_SWEEP_LIMIT_DEG (10)
 /* Distance from servo axis to sensor face along the pointing direction. */
 #define OBSTACLE_SENSOR_PIVOT_OFFSET_MM (0U)
+/* Maximum projected depth difference from the straight-ahead obstacle echo. */
+#define OBSTACLE_SCAN_FACE_TOLERANCE_MM (25U)
+/* Horizontal distance from the driven axle midpoint to the servo shaft.
+ * Use -1 until measured. The scan uses the servo alone while this is unknown. */
+#define OBSTACLE_AXLE_TO_SERVO_MM (65)
+/* Commands verified to produce a physical 90-degree pivot on the test floor. */
+#define ROBOT_PIVOT_RIGHT_90_COMMAND_DEG (90)
+#define ROBOT_PIVOT_LEFT_90_COMMAND_DEG  (90)
+#define ROBOT_PIVOT_CALIBRATED_DUTY      (60U)
+
+/* Obstacle bypass. Measure the radius from the axle midpoint to the furthest
+ * part of the car during an in-place turn. The initial value is for bench tests. */
+#define OBSTACLE_BYPASS_ENABLED          (1)
+#define OBSTACLE_BYPASS_BODY_WIDTH_MM     (130U)
+#define OBSTACLE_BYPASS_TURN_RADIUS_MM   (115U)
+#define OBSTACLE_BYPASS_MARGIN_MM         (30U)
+/* Travel alongside the box before checking a blocked return path again. */
+#define OBSTACLE_BYPASS_ALONG_STEP_MM     (60U)
+/* 1 checks a second position before returning. 0 returns at the first clear position. */
+#define OBSTACLE_BYPASS_REQUIRE_SECOND_CLEAR (1)
+/* Travel between the first and second clear checks to leave room for the final turn. */
+#define OBSTACLE_BYPASS_AFTER_CLEAR_MM   (160U)
+/* The 100 mm hand roll measured 1180 left ticks and 1097 right ticks. */
+#define OBSTACLE_BYPASS_TICKS_PER_MM      (11)
+/* Distance from the driven axle to the front IR sensors along the chassis. */
+#define OBSTACLE_BYPASS_IR_AHEAD_MM       (60U)
 
 /* Nominal line-following target per 10 ms at 100% and default drive duty.
  * The 50% hump setting targets 5 ticks per 10 ms. */
 #define LINE_CRUISE_BASE_TICKS_PER_UPDATE (10)
-#define LINE_CRUISE_SPEED_PERCENT       (50)
+#define LINE_CRUISE_SPEED_PERCENT       (60)
 
 /* Percentage of the cruise target added to the outer wheel and
  * subtracted from the inner wheel during an IR correction. */
 #ifndef LINE_STEERING_CORRECTION
-#define LINE_STEERING_CORRECTION  (40)
+#define LINE_STEERING_CORRECTION  (60)
 #endif
 
 /* Code 39 distance decoder limits, measured in encoder ticks. */
@@ -108,6 +136,9 @@
 #endif
 #if (LINE_CRUISE_SPEED_PERCENT < 1) || (100 < LINE_CRUISE_SPEED_PERCENT)
 #error "Line cruise speed must be from 1 to 100 percent"
+#endif
+#if ROBOT_HOLD_AT_JUNCTION != 0 && ROBOT_HOLD_AT_JUNCTION != 1
+#error "ROBOT_HOLD_AT_JUNCTION must be 0 or 1"
 #endif
 #if (LINE_CRUISE_BASE_TICKS_PER_UPDATE < 1) || (63 < LINE_CRUISE_BASE_TICKS_PER_UPDATE)
 #error "Line cruise base must be from 1 to 63 ticks per update"

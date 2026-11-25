@@ -293,7 +293,20 @@ EXPORT INT usermain(void)
             tm_sprintf(range_text, (UB *)"%u", (UINT)range_mm);
         }
         const uint16_t scan = obstacle_scan_status_word();
+        static const char *const scan_states[] =
+        {
+            [OBSTACLE_SCAN_IDLE] = "idle",
+            [OBSTACLE_SCAN_WAIT_STILL] = "waiting_for_wheels",
+            [OBSTACLE_SCAN_REFERENCE] = "measuring_forward",
+            [OBSTACLE_SCAN_COARSE] = "coarse_sweep",
+            [OBSTACLE_SCAN_FINE] = "refining_edges",
+            [OBSTACLE_SCAN_RECENTER] = "recentring",
+            [OBSTACLE_SCAN_COMPLETE] = "complete",
+            [OBSTACLE_SCAN_FAILED] = "failed",
+            [OBSTACLE_SCAN_PIVOT] = "pivoting"
+        };
         const uint16_t width_mm = scan & OBSTACLE_SCAN_WIDTH_MASK;
+        const char *scan_failure = obstacle_scan_failure();
         UB width_text[12] = "unavailable";
         if (width_mm != OBSTACLE_WIDTH_UNAVAILABLE)
         {
@@ -304,7 +317,7 @@ EXPORT INT usermain(void)
                         " enc_irq_gp1_gp3=%u%u enc_irq_gp5_gp7=%u%u"
                         " enc_in_gp1_gp3=%u%u enc_right_ticks=%d imu_stop=%s"
                         " control_gap_max_us=%u imu_gap_max_us=%u steer_request=%d"
-                        " range_mm=%s obstacle_hold=%u obstacle_width_mm=%s\n",
+                        " range_mm=%s obstacle_hold=%u obstacle_width_mm=%s obstacle_scan=%s obstacle_scan_error=\"%s\"\n",
                   ++count, direction, barcode_level, (UINT)edges,
                   peak_text, raw_peak_text, (INT)left_ticks,
                   (UINT)((encoder_gpios >> 1U) & 1U), (UINT)((encoder_gpios >> 3U) & 1U),
@@ -312,7 +325,8 @@ EXPORT INT usermain(void)
                   (UINT)((encoder_inputs >> 1U) & 1U), (UINT)((encoder_inputs >> 3U) & 1U),
                   (INT)right_ticks, imu_stop_reasons[imu_stop], (UINT)control_gap_us,
                   (UINT)imu_gap_us,
-                  (INT)motion_get_steering_offset(), range_text, (UINT)vehicle_obstacle_holding(), width_text);
+                  (INT)motion_get_steering_offset(), range_text, (UINT)vehicle_obstacle_holding(), width_text,
+                  scan_states[scan >> OBSTACLE_SCAN_STATE_SHIFT], scan_failure != NULL ? scan_failure : "none");
 #else
         tm_printf((UB *)"[HEARTBEAT] Pico alive (#%u) direction=%s\n", ++count, direction);
 #endif

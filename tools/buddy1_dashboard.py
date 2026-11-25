@@ -399,7 +399,7 @@ def show_sensors(data):
     range_text = f"{range_mm} mm" if range_mm is not None else "No echo"
     scan_state = obstacle.get("scan_state") if obstacle else None
     width_mm = obstacle.get("width_mm") if obstacle else None
-    if scan_state in {"measuring_forward", "coarse_sweep", "refining_edges", "recentring"}:
+    if scan_state in {"measuring_forward", "coarse_sweep", "refining_edges", "recentring", "pivoting"}:
         range_text = "Scanning"
     st.html('<div class="sensor-grid">' + "".join((
         panel("Line sensors", label(line["direction"]) if line["direction"] else "Unavailable", (

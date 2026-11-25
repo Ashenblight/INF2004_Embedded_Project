@@ -8,16 +8,23 @@
 #include "../../config/sensor_calibration.h"
 #include "ultrasonic.h"
 #include "obstacle_scan.h"
+#include "obstacle_bypass.h"
 
-/* Temporary barcode-only test. Set to 0 and rebuild for MQTT navigation. */
+/* Only the course controller object opts in to the MQTT course profile. */
+#ifndef APP_COURSE_RUN
+#define APP_COURSE_RUN 0
+#endif
+
 #ifndef S5_BARCODE_BENCH_TEST
 #define S5_BARCODE_BENCH_TEST 1
 #endif
+#define S5_USE_LOCAL_MAP (!APP_COURSE_RUN && S5_BARCODE_BENCH_TEST)
+#define S5_HOLD_JUNCTION (!APP_COURSE_RUN && ROBOT_HOLD_AT_JUNCTION)
 
 #if !APP_TEST
 
 #define S5_BUTTON_PIN       ROBOT_START_BUTTON_GPIO
-#define S5_BARCODE_RESULT_WAIT_MS 250U
+#define S5_BARCODE_RESULT_WAIT_MS 2000U
 
 static ID g_vehicle_cyclic_id;
 static uint32_t g_obstacle_holding;
@@ -27,14 +34,16 @@ extern void motion_set_mode_line_following(bool enabled) __attribute__((weak));
 extern ER motion_start_continuous(uint8_t speed_duty) __attribute__((weak));
 extern ER motion_stop(void) __attribute__((weak));
 extern void motion_emergency_stop(void) __attribute__((weak));
-extern ER motion_point_turn(int16_t angle_deg, uint8_t speed_duty) __attribute__((weak));
+extern ER motion_balanced_point_turn(int16_t angle_deg, uint8_t speed_duty) __attribute__((weak));
 extern void motion_get_status(motion_status_packed_t *status) __attribute__((weak));
 
 typedef enum
 {
     VEHICLE_IDLE,
     VEHICLE_FOLLOWING,
+    VEHICLE_OBSTACLE_SCAN,
     VEHICLE_OBSTACLE_HOLD,
+    VEHICLE_OBSTACLE_BYPASS,
     VEHICLE_READING_JUNCTION,
     VEHICLE_TURNING,
     VEHICLE_REACQUIRING_LINE
@@ -46,7 +55,11 @@ typedef struct
     UW phase_started_ms;
     uint32_t scan_mark_us;
     uint16_t mapping_revision;
+    barcode_mapping_entry_t route_map[4];
+    barcode_movement_t pending_move;
+    uint8_t pending_letter;
     bool turn_seen;
+    bool second_uturn_pivot_pending;
 } vehicle_run_t;
 
 static bool line_is_at_junction(uint8_t packed)
@@ -56,9 +69,9 @@ static bool line_is_at_junction(uint8_t packed)
                (LINE_STEER_CROSS_JUNCTION << LINE_STATUS_STEERING_SHIFT);
 }
 
-static ER get_route_mapping(uint16_t *revision)
+static ER get_route_mapping(vehicle_run_t *run)
 {
-    if (S5_BARCODE_BENCH_TEST)
+    if (S5_USE_LOCAL_MAP)
     {
         static const barcode_mapping_entry_t test_map[] = {
             {0U, BARCODE_MOVE_LEFT}, {5U, BARCODE_MOVE_RIGHT}, {25U, BARCODE_MOVE_FORWARD}
@@ -67,8 +80,31 @@ static ER get_route_mapping(uint16_t *revision)
         if (result != E_OK)
             return result;
     }
-    barcode_mapping_entry_t map[4];
-    return barcode_mapping_copy(map, revision);
+    return barcode_mapping_copy(run->route_map, &run->mapping_revision);
+}
+
+static const char *const barcode_actions[] = {"NONE", "LEFT", "RIGHT", "STRAIGHT", "UTURN"};
+
+static void cache_barcode(vehicle_run_t *run)
+{
+    barcode_character_t character;
+    if (run->pending_move != BARCODE_MOVE_NONE ||
+        barcode_task_take_scan(run->scan_mark_us, &character) != E_OK)
+        return;
+
+    for (unsigned i = 0; i < 4U; ++i)
+    {
+        const barcode_mapping_entry_t entry = run->route_map[i];
+        if (entry.letter == character.letter &&
+            entry.movement >= BARCODE_MOVE_LEFT && entry.movement <= BARCODE_MOVE_UTURN)
+        {
+            run->pending_move = (barcode_movement_t)entry.movement;
+            run->pending_letter = character.letter;
+            tm_printf((UB *)"[S5] Cached barcode %c action=%s for next junction.\n",
+                      'A' + character.letter, barcode_actions[run->pending_move]);
+            return;
+        }
+    }
 }
 
 static void disable_route_sensing(void)
@@ -115,7 +151,7 @@ static bool start_line_following(vehicle_run_t *run)
         return false;
     }
 
-    ER result = get_route_mapping(&run->mapping_revision);
+    ER result = get_route_mapping(run);
     if (result != E_OK)
     {
         tm_printf((UB *)"[S5] Route mapping unavailable (%d).\n", (INT)result);
@@ -127,6 +163,7 @@ static bool start_line_following(vehicle_run_t *run)
         return false;
     }
 
+    run->pending_move = BARCODE_MOVE_NONE;
     run->scan_mark_us = barcode_task_scan_mark();
     barcode_task_reset_raw_trace();
     motion_set_mode_line_following(true);
@@ -158,12 +195,13 @@ static vehicle_phase_t stop_for_obstacle(void)
 {
     motion_emergency_stop();
     disable_route_sensing();
-    imu_hump_end_run();
+    if (!OBSTACLE_BYPASS_ENABLED)
+        imu_hump_end_run();
     obstacle_scan_begin(rp2040_timer_ms32());
     __atomic_store_n(&g_obstacle_holding, 1U, __ATOMIC_RELEASE);
     tm_printf((UB *)"[S5] Obstacle at %u mm. Braking and holding.\n",
               (UINT)ultrasonic_distance_mm());
-    return VEHICLE_OBSTACLE_HOLD;
+    return VEHICLE_OBSTACLE_SCAN;
 }
 
 static void request_vehicle_stop(void)
@@ -198,7 +236,7 @@ static vehicle_phase_t start_straight_crossing(void)
     return VEHICLE_REACQUIRING_LINE;
 }
 
-static vehicle_phase_t follow_route(void)
+static vehicle_phase_t follow_route(vehicle_run_t *run)
 {
     line_task_status_t line;
     if ((E_OK == line_task_get_latest(&line)) &&
@@ -211,75 +249,77 @@ static vehicle_phase_t follow_route(void)
         return VEHICLE_READING_JUNCTION;
     }
 
+    cache_barcode(run);
     return VEHICLE_FOLLOWING;
+}
+
+static vehicle_phase_t start_junction_turn(vehicle_run_t *run, int16_t command_deg)
+{
+    if (motion_balanced_point_turn(command_deg, ROBOT_PIVOT_CALIBRATED_DUTY) != E_OK)
+    {
+        return stop_vehicle();
+    }
+    run->turn_seen = false;
+    return VEHICLE_TURNING;
 }
 
 static vehicle_phase_t read_junction(vehicle_run_t *run,
                                      const motion_status_packed_t *motion, UW elapsed_ms)
 {
+    if (elapsed_ms <= S5_BARCODE_RESULT_WAIT_MS)
+        cache_barcode(run);
     if (motion->state != MOTION_STATE_STOPPED)
         return VEHICLE_READING_JUNCTION;
 
-    barcode_character_t character;
     barcode_movement_t movement = BARCODE_MOVE_FORWARD;
-    const ER scan = barcode_task_take_scan(run->scan_mark_us, &character);
-    if (scan != E_OK)
+    if (run->pending_move != BARCODE_MOVE_NONE)
     {
-        if (elapsed_ms < S5_BARCODE_RESULT_WAIT_MS)
-            return VEHICLE_READING_JUNCTION;
-        tm_printf((UB *)"[S5] Junction barcode UNKNOWN; no fresh completed scan.\n");
-        barcode_task_request_raw_dump();
-    }
-    else
-    {
-        barcode_mapping_entry_t map[4];
+        barcode_mapping_entry_t current_map[4];
         uint16_t revision;
-        if (barcode_mapping_copy(map, &revision) == E_OK && revision == run->mapping_revision)
+        const ER result = barcode_mapping_copy(current_map, &revision);
+        if (result == E_OK && revision == run->mapping_revision)
         {
-            for (unsigned i = 0; i < 4U; ++i)
-            {
-                if (map[i].letter == character.letter)
-                {
-                    movement = (barcode_movement_t)map[i].movement;
-                    break;
-                }
-            }
+            movement = run->pending_move;
+            tm_printf((UB *)"[S5] Junction barcode %c action=%s.\n",
+                      'A' + run->pending_letter, barcode_actions[movement]);
+        }
+        else if (elapsed_ms < S5_BARCODE_RESULT_WAIT_MS)
+        {
+            return VEHICLE_READING_JUNCTION;
         }
         else
         {
-            tm_printf((UB *)"[S5] Stale map. Using STRAIGHT.\n");
+            tm_printf((UB *)"[S5] Junction route map changed or unavailable. Using STRAIGHT.\n");
         }
-        const char *const actions[] = {"NONE", "LEFT", "RIGHT", "STRAIGHT", "UTURN"};
-        tm_printf((UB *)"[S5] Junction barcode %c action=%s\n", 'A' + character.letter, actions[movement]);
+        run->pending_move = BARCODE_MOVE_NONE;
     }
-    if (S5_BARCODE_BENCH_TEST)
+    else
     {
-        tm_printf((UB *)"[S5] Barcode bench complete; staying stopped.\n");
+        if (elapsed_ms < S5_BARCODE_RESULT_WAIT_MS)
+            return VEHICLE_READING_JUNCTION;
+        tm_printf((UB *)"[S5] No barcode command after 2 s. Using STRAIGHT.\n");
+        barcode_task_request_raw_dump();
+    }
+    if (S5_HOLD_JUNCTION)
+    {
+        tm_printf((UB *)"[S5] Junction read complete. Staying stopped.\n");
         return VEHICLE_IDLE;
     }
 
-    int16_t angle;
+    motion_clear_emergency_stop();
+    /* A calibrated 90-degree command can exceed 90, so do a U-turn in
+     * two segments rather than exceeding the motion API's angle range. */
+    run->second_uturn_pivot_pending = movement == BARCODE_MOVE_UTURN;
     switch (movement)
     {
     case BARCODE_MOVE_LEFT:
-        angle = -90;
-        break;
+        return start_junction_turn(run, -ROBOT_PIVOT_LEFT_90_COMMAND_DEG);
     case BARCODE_MOVE_RIGHT:
-        angle = 90;
-        break;
     case BARCODE_MOVE_UTURN:
-        angle = 180;
-        break;
+        return start_junction_turn(run, ROBOT_PIVOT_RIGHT_90_COMMAND_DEG);
     default:
         return start_straight_crossing();
     }
-    if (E_OK != motion_point_turn(angle, 40U))
-    {
-        return stop_vehicle();
-    }
-
-    run->turn_seen = false;
-    return VEHICLE_TURNING;
 }
 
 static vehicle_phase_t reacquire_line(vehicle_run_t *run)
@@ -298,6 +338,7 @@ static vehicle_phase_t reacquire_line(vehicle_run_t *run)
     run->scan_mark_us = barcode_task_scan_mark();
     barcode_task_reset_raw_trace();
     motion_set_mode_line_following(true);
+    tm_printf((UB *)"[S5] Line following resumed.\n");
     return VEHICLE_FOLLOWING;
 }
 
@@ -305,12 +346,45 @@ static vehicle_phase_t update_vehicle_run(vehicle_run_t *run, UW now_ms)
 {
     if (VEHICLE_FOLLOWING == run->phase)
     {
-        return follow_route();
+        return follow_route(run);
+    }
+    if (run->phase == VEHICLE_OBSTACLE_SCAN)
+    {
+        if (obstacle_scan_busy())
+            return VEHICLE_OBSTACLE_SCAN;
+        obstacle_scan_profile_t profile;
+        if (OBSTACLE_BYPASS_ENABLED && obstacle_scan_get_profile(&profile) &&
+            obstacle_bypass_begin(&profile, now_ms))
+        {
+            __atomic_store_n(&g_obstacle_holding, 0U, __ATOMIC_RELEASE);
+            return VEHICLE_OBSTACLE_BYPASS;
+        }
+        imu_hump_end_run();
+        return VEHICLE_OBSTACLE_HOLD;
+    }
+    if (run->phase == VEHICLE_OBSTACLE_BYPASS)
+    {
+        const obstacle_bypass_result_t status = obstacle_bypass_poll(now_ms);
+        if (status == OBSTACLE_BYPASS_ACTIVE)
+            return VEHICLE_OBSTACLE_BYPASS;
+        if (status == OBSTACLE_BYPASS_REJOINED)
+        {
+            const vehicle_phase_t departure = start_straight_crossing();
+            if (departure == VEHICLE_REACQUIRING_LINE)
+            {
+                __atomic_store_n(&g_obstacle_holding, 0U, __ATOMIC_RELEASE);
+                tm_printf((UB *)"[S5 BYPASS] Original line rejoined. Moving forward to resume line following.\n");
+            }
+            if (departure != VEHICLE_IDLE)
+                return departure;
+        }
+        motion_latch_run_stop();
+        __atomic_store_n(&g_obstacle_holding, 1U, __ATOMIC_RELEASE);
+        return VEHICLE_OBSTACLE_HOLD;
     }
 
     const UW elapsed_ms = now_ms - run->phase_started_ms;
-    if (((VEHICLE_READING_JUNCTION == run->phase) && (1000U < elapsed_ms))
-        || (5000U < elapsed_ms))
+    if (5000U < elapsed_ms)
     {
         tm_printf((UB *)"[S5] Junction operation timed out; stopping.\n");
         return stop_vehicle();
@@ -337,6 +411,12 @@ static vehicle_phase_t update_vehicle_run(vehicle_run_t *run, UW now_ms)
     }
     if (run->turn_seen && (MOTION_STATE_STOPPED == motion.state))
     {
+        if (run->second_uturn_pivot_pending)
+        {
+            run->second_uturn_pivot_pending = false;
+            run->phase_started_ms = now_ms;
+            return start_junction_turn(run, ROBOT_PIVOT_RIGHT_90_COMMAND_DEG);
+        }
         return start_straight_crossing();
     }
     return VEHICLE_TURNING;
@@ -349,10 +429,12 @@ static void vehicle_button_task(INT stacd, void *exinf)
     vehicle_run_t run = {.phase = VEHICLE_IDLE};
     (void)stacd;
     (void)exinf;
-    if (S5_BARCODE_BENCH_TEST)
-        tm_printf((UB *)"[S5] Barcode bench: A=LEFT F=RIGHT Z=STRAIGHT; GP20 starts/stops; cross stops.\n");
+    if (S5_USE_LOCAL_MAP)
+        tm_printf((UB *)"[S5] Local map A=LEFT F=RIGHT Z=STRAIGHT. GP20 starts/stops.\n");
     else
         tm_printf((UB *)"[S5] Receive the MQTT map, then press GP20 to start or stop.\n");
+    tm_printf((UB *)"[S5] Junction hold=%u bypass=%u.\n",
+              (UINT)S5_HOLD_JUNCTION, (UINT)OBSTACLE_BYPASS_ENABLED);
     tm_printf((UB *)"[S5] Forward sonar GP%u trigger/GP%u echo. Obstacle threshold=%u mm.\n",
               ULTRASONIC_TRIGGER_GPIO, ULTRASONIC_ECHO_GPIO, ULTRASONIC_STOP_DISTANCE_MM);
     while (tk_slp_tsk(TMO_FEVR) == E_OK)
@@ -361,17 +443,23 @@ static void vehicle_button_task(INT stacd, void *exinf)
         if (motion_run_stop_latched())
         {
             disable_route_sensing();
+            if (run.phase == VEHICLE_OBSTACLE_BYPASS)
+                __atomic_store_n(&g_obstacle_holding, 1U, __ATOMIC_RELEASE);
             run.phase = VEHICLE_IDLE;
             tm_printf((UB *)"[S5] Run ended. Reset the robot to rearm.\n");
             break;
         }
         const uint32_t now_ms = rp2040_timer_ms32();
-        ultrasonic_poll(obstacle_scan_allows_ping(now_ms));
+        ultrasonic_poll(obstacle_scan_allows_ping(now_ms) &&
+                        (run.phase != VEHICLE_OBSTACLE_BYPASS || obstacle_bypass_allows_ping()));
         obstacle_scan_poll(now_ms);
         if ((run.phase == VEHICLE_FOLLOWING || run.phase == VEHICLE_REACQUIRING_LINE) &&
             ultrasonic_obstacle_detected())
         {
+            const bool was_following = run.phase == VEHICLE_FOLLOWING;
             run.phase = stop_for_obstacle();
+            if (was_following)
+                cache_barcode(&run);
         }
 
         const bool pressed = gpio_get_val(S5_BUTTON_PIN) == 0U;
@@ -389,6 +477,18 @@ static void vehicle_button_task(INT stacd, void *exinf)
 
         if (new_press)
         {
+            if (run.phase == VEHICLE_OBSTACLE_BYPASS)
+            {
+                obstacle_bypass_cancel();
+                __atomic_store_n(&g_obstacle_holding, 1U, __ATOMIC_RELEASE);
+                break;
+            }
+            if (run.phase == VEHICLE_OBSTACLE_SCAN)
+            {
+                motion_latch_run_stop();
+                tm_printf((UB *)"[S5] Scan cancelled. Realign and reset.\n");
+                break;
+            }
             if (run.phase == VEHICLE_IDLE || run.phase == VEHICLE_OBSTACLE_HOLD)
             {
                 if (start_line_following(&run))
@@ -420,7 +520,8 @@ static void vehicle_button_task(INT stacd, void *exinf)
                 imu_hump_end_run();
         }
     }
-    if (run.phase != VEHICLE_IDLE && run.phase != VEHICLE_OBSTACLE_HOLD)
+    if (run.phase != VEHICLE_IDLE && run.phase != VEHICLE_OBSTACLE_HOLD &&
+        run.phase != VEHICLE_OBSTACLE_SCAN && run.phase != VEHICLE_OBSTACLE_BYPASS)
     {
         request_vehicle_stop();
     }
@@ -448,7 +549,8 @@ ER vehicle_controller_start(void)
 #else
     if (motion_set_mode_line_following == NULL || motion_start_continuous == NULL ||
         motion_stop == NULL || motion_emergency_stop == NULL ||
-        (!S5_BARCODE_BENCH_TEST && motion_point_turn == NULL) || motion_get_status == NULL)
+        (!S5_HOLD_JUNCTION && motion_balanced_point_turn == NULL) ||
+        motion_get_status == NULL)
     {
         tm_printf((UB *)"[S5] Button test needs Buddy 2 Motion Control.\n");
         return E_OBJ;

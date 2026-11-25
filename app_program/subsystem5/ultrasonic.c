@@ -12,9 +12,10 @@
 #define ECHO_EDGE_RISE   (0x08U)
 #define TRIGGER_MASK     (1UL << ULTRASONIC_TRIGGER_GPIO)
 
-#if ULTRASONIC_STOP_DISTANCE_MM == 0U || ULTRASONIC_RANGE_BIAS_MM >= MAX_RANGE_MM || \
-    ULTRASONIC_STOP_DISTANCE_MM > (MAX_RANGE_MM - ULTRASONIC_RANGE_BIAS_MM)
-#error "Ultrasonic stop distance and range bias must fit the sensor range"
+#if ULTRASONIC_STOP_DISTANCE_MM == 0U || ULTRASONIC_STOP_DISTANCE_MM > MAX_RANGE_MM || \
+    (ULTRASONIC_RANGE_OFFSET_MM > 0 && ULTRASONIC_RANGE_OFFSET_MM >= ULTRASONIC_STOP_DISTANCE_MM) || \
+    (ULTRASONIC_RANGE_OFFSET_MM < 0 && -ULTRASONIC_RANGE_OFFSET_MM > MAX_RANGE_MM - ULTRASONIC_STOP_DISTANCE_MM)
+#error "Ultrasonic stop distance and range offset must fit the sensor range"
 #endif
 
 typedef enum
@@ -80,9 +81,16 @@ static void publish_echo(uint32_t pulse_us)
     uint16_t range = ULTRASONIC_NO_ECHO;
     if (distance_mm != 0U && distance_mm <= MAX_RANGE_MM)
     {
-        /* Keep very short returns close even when the bias exceeds the range. */
-        range = distance_mm > ULTRASONIC_RANGE_BIAS_MM
-            ? (uint16_t)(distance_mm - ULTRASONIC_RANGE_BIAS_MM) : 1U;
+        int32_t calibrated_mm = (int32_t)distance_mm + ULTRASONIC_RANGE_OFFSET_MM;
+        if (calibrated_mm < 1)
+        {
+            calibrated_mm = 1;
+        }
+        else if (calibrated_mm > (int32_t)MAX_RANGE_MM)
+        {
+            calibrated_mm = (int32_t)MAX_RANGE_MM;
+        }
+        range = (uint16_t)calibrated_mm;
     }
     __atomic_store_n(&g_distance_mm, range, __ATOMIC_RELEASE);
     ++g_sample_id;
