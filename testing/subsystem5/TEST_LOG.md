@@ -10,11 +10,14 @@ Define a test here before running it. Test IDs never change.
 
 | ID | What is tested | Requirement / interface | Method | Steps / how | Expected result |
 |---|---|---|---|---|---|
-| S5-U01 | example: runs in a task context | | auto | `subsystem5_test.c` | `[TEST] S5-U01 PASS` |
+| S5-U01 | Initial task-context check (retired) | | auto | Earlier test image | Located a running test task |
 | S5-U02 | | | manual | 1. … 2. … | |
+| S5-U03 | Axle advance after braking travel | Junction geometry | auto | Supply one mm of forward travel at both wheels | One mm less travel remains |
+| S5-U04 | Axle advance after reverse travel | Junction geometry | auto | Supply one mm of reverse travel at both wheels | Full axle-to-IR distance remains |
+| S5-U05 | Signed U-turn target | Junction geometry | auto | Split the configured command into two pivots | The two commands sum to the configured target |
 
 *Method:* **auto** = `TEST_CHECK` in code, result printed on the console;
-**manual** = a person observes the result (LED, scope, meter, phone app…).
+**manual** = a person observes the result (LED, oscilloscope, or meter).
 
 ## Results
 

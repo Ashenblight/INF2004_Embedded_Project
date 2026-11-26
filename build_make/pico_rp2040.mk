@@ -91,6 +91,56 @@ ifeq ($(TEST),1)
 TEST_SUFFIX := _test
 endif
 
+# Full course run uses the received MQTT map and leaves the junction after reading.
+COURSE_RUN ?= 0
+ifneq ($(filter $(COURSE_RUN),0 1),$(COURSE_RUN))
+$(error Unknown COURSE_RUN '$(COURSE_RUN)'; use 0 or 1)
+endif
+ifeq ($(COURSE_RUN),1)
+ifneq ($(MQTT),1)
+$(error COURSE_RUN=1 requires MQTT=1)
+endif
+COURSE_SUFFIX := _course
+endif
+
+# Stationary servo diagnostic. Keep its UF2 separate from the driving image.
+SERVO_TEST ?= 0
+ifneq ($(filter $(SERVO_TEST),0 1),$(SERVO_TEST))
+$(error Unknown SERVO_TEST '$(SERVO_TEST)'; use 0 or 1)
+endif
+ifeq ($(SERVO_TEST),1)
+ifeq ($(TEST),1)
+$(error SERVO_TEST and TEST require separate builds)
+endif
+SERVO_TEST_SUFFIX := _servo_test
+endif
+
+# One point turn per button press, with USB calibration output.
+TURN_TEST ?= 0
+ifneq ($(filter $(TURN_TEST),0 1),$(TURN_TEST))
+$(error Unknown TURN_TEST '$(TURN_TEST)'; use 0 or 1)
+endif
+ifeq ($(TURN_TEST),1)
+ifneq ($(TEST)$(SERVO_TEST),00)
+$(error TURN_TEST requires a separate build from TEST and SERVO_TEST)
+endif
+TURN_TEST_SUFFIX := _turn_test
+endif
+
+# Pause only the live barcode worker for timing comparisons.
+BARCODE_CAPTURE ?= 1
+ifneq ($(filter $(BARCODE_CAPTURE),0 1),$(BARCODE_CAPTURE))
+$(error Unknown BARCODE_CAPTURE '$(BARCODE_CAPTURE)'; use 0 or 1)
+endif
+ifeq ($(BARCODE_CAPTURE),0)
+BARCODE_SUFFIX := _barcode_off
+endif
+ifeq ($(COURSE_RUN),1)
+ifneq ($(TEST)$(SERVO_TEST)$(TURN_TEST)$(BARCODE_CAPTURE),0001)
+$(error COURSE_RUN=1 requires barcode capture and a normal driving build)
+endif
+endif
+
 # CRASH_REPORT=1 also copies every console line to UART0 on GP0 (TX) /
 # GP1 (RX), 115200 8N1.  UART output is sent immediately, so it still shows
 # the last messages and the kernel's crash report after a crash, when the
@@ -116,7 +166,7 @@ endif
 # a live hazard: an SMP=1 build was once flashed in place of an SMP=0 one and
 # only the banner in the log revealed it.
 #
-EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(NET_SUFFIX)$(MQTT_SUFFIX)$(CRASH_SUFFIX)$(TEST_SUFFIX)
+EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(NET_SUFFIX)$(MQTT_SUFFIX)$(CRASH_SUFFIX)$(TEST_SUFFIX)$(BARCODE_SUFFIX)$(SERVO_TEST_SUFFIX)$(TURN_TEST_SUFFIX)$(COURSE_SUFFIX)
 
 GCC := arm-none-eabi-gcc
 AS := arm-none-eabi-gcc
@@ -177,6 +227,10 @@ CFLAGS  += -DCNF_SMP=1
 ASFLAGS += -DCNF_SMP=1
 endif
 CFLAGS  += -DAPP_TEST=$(TEST)
+CFLAGS  += -DAPP_COURSE_RUN=$(COURSE_RUN)
+CFLAGS  += -DAPP_SERVO_TEST=$(SERVO_TEST)
+CFLAGS  += -DAPP_TURN_TEST=$(TURN_TEST)
+CFLAGS  += -DAPP_BARCODE_CAPTURE=$(BARCODE_CAPTURE)
 CFLAGS  += -DTM_CONSOLE_UART=$(CRASH_REPORT)
 ifeq ($(CRASH_REPORT),0)
 CFLAGS  += -DBOARD_UART0_FREE=1
@@ -209,7 +263,7 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)
+PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)-barcode$(BARCODE_CAPTURE)-servo$(SERVO_TEST)-turn$(TURN_TEST)-course$(COURSE_RUN)
 PROFILE_FILE := .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))

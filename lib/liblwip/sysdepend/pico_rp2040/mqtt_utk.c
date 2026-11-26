@@ -1,274 +1,309 @@
 /*
- *	mqtt_utk.c
- *	MQTT client wiring for micro T-Kernel (RP2040, NO_SYS=1)
- *
- *	Runs entirely on the single processor-1-owned task that already owns
- *	the CYW43439 and the rest of lwIP (docs/RELEASE.md safety rule 6):
- *	cyw43_utk_task() (cyw43_utk.c) calls mqtt_utk_start() once, the first
- *	time it observes CYW43_LINK_UP. mqtt.c's own keepalive/ping/retry
- *	timers, and the heartbeat below, both ride the same sys_check_timeouts()
- *	polling that task already does for DHCP and TCP -- nothing extra runs
- *	on any other task or core.
- *
- *	This file does not include tk/tkernel.h or any pico-sdk/cyw43 header
- *	(unlike cyw43_utk.c and sys_arch.c), so it isn't subject to either
- *	file's size_t workaround -- tm/tmonitor.h alone is namespace-safe here.
+ * MQTT connection and live telemetry for the RP2040 lwIP task.
+ * The network task owns the client, its timers, and inbound frame assembly.
  */
-
-#include "lwip/apps/mqtt.h"
-#include "lwip/ip_addr.h"
-#include "lwip/timeouts.h"
-#include "wifi_secrets.h"
 #include "mqtt_utk.h"
-#include "../../../../app_program/subsystem3/barcode_config.h"
+
+#include "lwip/altcp.h"
+#include "lwip/apps/mqtt.h"
+#include "lwip/apps/mqtt_priv.h"
+#include "lwip/ip_addr.h"
+#include "lwip/sys.h"
+#include "lwip/timeouts.h"
+#include "robot_timing.h"
+#include "wifi_secrets.h"
+
+#include "../../../../app_program/subsystem1/robot_telemetry.h"
+
+#include <stdbool.h>
 #include <string.h>
 #include <tm/tmonitor.h>
 
-#define MQTT_UTK_HEARTBEAT_MS   5000
-#define MQTT_UTK_KEEPALIVE_S    60
-#define MQTT_UTK_RETRY_MS       3000
+#if APP_COURSE_RUN
+#include "../../../../app_program/subsystem3/barcode_config.h"
+#endif
 
-/* Inbound message staging. A publish arrives as one topic callback followed by
- * one or more data callbacks, so the topic has to be kept until the fragment
- * carrying MQTT_DATA_FLAG_LAST shows up. Both buffers are sized well past the
- * heartbeat this demo publishes; anything longer is truncated and flagged
- * rather than being allowed to run off the end. */
-#define MQTT_UTK_RX_TOPIC_MAX   64
-#define MQTT_UTK_RX_DATA_MAX    128
+#define MQTT_HEARTBEAT_MS       (5000U)
+#define MQTT_PUBLISH_USER       "se05-robot"
+#define MQTT_KEEPALIVE_S        (10U)
+#define MQTT_RETRY_MS           (3000U)
+#define MQTT_CONNECT_TIMEOUT_MS (5000U)
+#define MQTT_TELEMETRY_TOPIC    MQTT_CLIENT_ID "/telemetry/bench"
 
-static mqtt_client_t	*client;
-static ip_addr_t	broker_addr;
-static u8_t		connecting;
-
-static char		rx_topic[MQTT_UTK_RX_TOPIC_MAX];
-static UB		rx_data[MQTT_UTK_RX_DATA_MAX];
-static u16_t		rx_len;
-static u8_t		rx_truncated;
-static u32_t rx_expected_len;
-static mqtt_mapping_handler_t mapping_handler;
-/* Network-owner task only. Retain an early map until S3 registers its handler. */
-static unsigned char pending_mapping[6];
-static unsigned pending_mapping_length;
-static u8_t mapping_pending;
-
-void mqtt_utk_set_mapping_handler(mqtt_mapping_handler_t handler)
+typedef enum
 {
-    __atomic_store_n(&mapping_handler, handler, __ATOMIC_RELEASE);
+    CONNECTION_IDLE,
+    CONNECTION_CONNECTING,
+    CONNECTION_RETRY
+} connection_state_t;
+
+static mqtt_client_t *gp_client = NULL;
+static connection_state_t g_connection_state = CONNECTION_IDLE;
+static uint32_t g_connection_time_ms = 0U;
+static unsigned int g_heartbeat_count = 0U;
+#if !APP_TEST
+static uint32_t g_last_telemetry_ms = 0U;
+#endif
+
+#if APP_COURSE_RUN
+#define MAP_MIN_BYTES (5U)
+#define MAP_MAX_BYTES (6U)
+
+static uint8_t g_map_frame[MAP_MAX_BYTES];
+static uint16_t g_map_expected = 0U;
+static uint16_t g_map_received = 0U;
+static uint8_t g_pending_map[MAP_MAX_BYTES];
+static uint16_t g_pending_length = 0U;
+static mqtt_mapping_handler_t gp_mapping_handler = NULL;
+
+void mqtt_utk_set_mapping_handler(mqtt_mapping_handler_t p_handler)
+{
+    __atomic_store_n(&gp_mapping_handler, p_handler, __ATOMIC_RELEASE);
 }
 
 static void deliver_pending_mapping(void)
 {
-    mqtt_mapping_handler_t handler =
-        __atomic_load_n(&mapping_handler, __ATOMIC_ACQUIRE);
-    if (!mapping_pending || handler == NULL)
+    const mqtt_mapping_handler_t p_handler =
+        __atomic_load_n(&gp_mapping_handler, __ATOMIC_ACQUIRE);
+    if ((0U == g_pending_length) || (NULL == p_handler))
+    {
         return;
-    const int result = handler(pending_mapping, pending_mapping_length);
-    if (result == 1)
-        return;
-    mapping_pending = 0;
-    tm_printf((UB *)"mqtt: mapping %s (result=%d)\n",
-              result == 0 ? "applied" : "rejected", result);
+    }
+
+    const int result = p_handler(g_pending_map, g_pending_length);
+    if (MQTT_MAPPING_RETRY != result)
+    {
+        g_pending_length = 0U;
+        tm_printf((UB *)"mqtt: mapping %s (result=%d)\n",
+                  (0 == result) ? "applied" : "rejected", result);
+    }
 }
 
-static void heartbeat_timeout(void *arg);
-
-/* mqtt.c NUL-terminates the topic before handing it over, but it is only
- * valid for the duration of this call -- copy it out. */
-static void incoming_publish_cb(void *arg, const char *topic, u32_t tot_len)
+static void incoming_publish_cb(void *p_arg, const char *p_topic,
+                                uint32_t total_length)
 {
-	u32_t	i;
+    (void)p_arg;
 
-	(void)arg;
-
-	for(i = 0; i < (MQTT_UTK_RX_TOPIC_MAX - 1) && topic[i] != '\0'; i++) {
-		rx_topic[i] = topic[i];
-	}
-	rx_topic[i] = '\0';
-
-	rx_len = 0;
-	rx_expected_len = tot_len;
-	rx_truncated = tot_len >= MQTT_UTK_RX_DATA_MAX;
+    g_map_received = 0U;
+    g_map_expected = 0U;
+    if ((MAP_MIN_BYTES <= total_length) &&
+        (MAP_MAX_BYTES >= total_length) &&
+        (0 == strcmp(p_topic, BARCODE_MAPPING_TOPIC)))
+    {
+        g_map_expected = (uint16_t)total_length;
+    }
 }
 
-static void incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags)
+static void incoming_data_cb(void *p_arg, const uint8_t *p_data,
+                             uint16_t length, uint8_t flags)
 {
-	u16_t	i;
+    (void)p_arg;
 
-	(void)arg;
+    if (0U == g_map_expected)
+    {
+        return;
+    }
+    if (length > g_map_expected - g_map_received)
+    {
+        g_map_expected = 0U;
+        return;
+    }
+    if (0U != length)
+    {
+        memcpy(&g_map_frame[g_map_received], p_data, length);
+        g_map_received += length;
+    }
+    if (0U != (flags & MQTT_DATA_FLAG_LAST))
+    {
+        if (g_map_received == g_map_expected)
+        {
+            memcpy(g_pending_map, g_map_frame, g_map_received);
+            g_pending_length = g_map_received;
+            deliver_pending_mapping();
+        }
+        g_map_expected = 0U;
+    }
+}
 
-	for(i = 0; i < len; i++) {
-		if(rx_len < (MQTT_UTK_RX_DATA_MAX - 1)) {
-			/* Preserve binary bytes for mapping validation. Other payloads
-			 * are sanitized only when displayed below. */
-			rx_data[rx_len++] = data[i];
-		} else {
-			rx_truncated = 1;
-		}
-	}
+static void mapping_subscribe_cb(void *p_arg, err_t result)
+{
+    (void)p_arg;
 
-	if((flags & MQTT_DATA_FLAG_LAST) != 0) {
-        if (strcmp(rx_topic, BARCODE_MAPPING_TOPIC) == 0) {
-            if (rx_truncated || rx_len != rx_expected_len ||
-                (rx_len != 5U && rx_len != 6U) || rx_data[0] != 0x17U) {
-                tm_printf((UB *)"mqtt: mapping dropped (invalid format or incomplete)\n");
-            } else {
-                memcpy(pending_mapping, rx_data, rx_len);
-                pending_mapping_length = rx_len;
-                mapping_pending = 1;
-                deliver_pending_mapping();
-            }
+    tm_printf((UB *)"mqtt: mapping subscription %s [%s]\n",
+              (ERR_OK == result) ? "ready" : "failed",
+              BARCODE_MAPPING_TOPIC);
+}
+#endif
+
+static void publish_done_cb(void *p_arg, err_t result)
+{
+    (void)p_arg;
+
+    if (ERR_OK != result)
+    {
+        tm_printf((UB *)"mqtt: publish failed, err=%d\n", (int)result);
+    }
+}
+
+static void heartbeat_timeout(void *p_arg)
+{
+    (void)p_arg;
+
+    UB payload[72];
+    int length;
+#if APP_TEST
+    length = tm_sprintf(payload, (const UB *)"hb %u boot=test",
+                        g_heartbeat_count);
+#else
+    const int error = robot_telemetry_boot_error();
+    const char *p_stage = robot_telemetry_boot_stage();
+    if (0 == error)
+    {
+        length = tm_sprintf(payload, (const UB *)"hb %u boot=%s",
+                            g_heartbeat_count, p_stage);
+    }
+    else
+    {
+        length = tm_sprintf(payload, (const UB *)"hb %u boot=%s err=%d",
+                            g_heartbeat_count, p_stage, error);
+    }
+#endif
+    ++g_heartbeat_count;
+    tm_printf((UB *)"mqtt: TX [" MQTT_TOPIC "] \"%s\"\n", payload);
+    (void)mqtt_publish(gp_client, MQTT_TOPIC, payload, (uint16_t)length,
+                       0U, 0U, publish_done_cb, NULL);
+    sys_timeout(MQTT_HEARTBEAT_MS, heartbeat_timeout, NULL);
+}
+
+static void defer_connection_retry(void)
+{
+    sys_untimeout(heartbeat_timeout, NULL);
+    g_connection_time_ms = sys_now();
+    g_connection_state = CONNECTION_RETRY;
+}
+
+static void connection_cb(mqtt_client_t *p_client, void *p_arg,
+                          mqtt_connection_status_t status)
+{
+    (void)p_arg;
+
+    if (MQTT_CONNECT_ACCEPTED != status)
+    {
+        tm_printf((UB *)"mqtt: connection status %d, retrying in %u s\n",
+                  (int)status, (unsigned int)(MQTT_RETRY_MS / 1000U));
+        defer_connection_retry();
+        return;
+    }
+
+    g_connection_state = CONNECTION_IDLE;
+    altcp_nagle_disable(p_client->conn);
+    tm_printf((UB *)"mqtt: connected to " MQTT_BROKER_IP "\n");
+#if APP_COURSE_RUN
+    mqtt_set_inpub_callback(p_client, incoming_publish_cb, incoming_data_cb,
+                            NULL);
+    const err_t result = mqtt_subscribe(p_client, BARCODE_MAPPING_TOPIC, 1U,
+                                        mapping_subscribe_cb, NULL);
+    if (ERR_OK != result)
+    {
+        tm_printf((UB *)"mqtt: mapping subscribe failed, err=%d\n",
+                  (int)result);
+    }
+#endif
+    sys_untimeout(heartbeat_timeout, NULL);
+    sys_timeout(MQTT_HEARTBEAT_MS, heartbeat_timeout, NULL);
+}
+
+static void connect_to_broker(uint32_t now_ms)
+{
+    ip_addr_t broker_addr;
+    if (0 == ip4addr_aton(MQTT_BROKER_IP, ip_2_ip4(&broker_addr)))
+    {
+        tm_printf((UB *)"mqtt: bad MQTT_BROKER_IP\n");
+        defer_connection_retry();
+        return;
+    }
+    IP_SET_TYPE(&broker_addr, IPADDR_TYPE_V4);
+
+    if (NULL == gp_client)
+    {
+        gp_client = mqtt_client_new();
+        if (NULL == gp_client)
+        {
+            tm_printf((UB *)"mqtt: mqtt_client_new() failed\n");
+            defer_connection_retry();
             return;
         }
-        for (i = 0; i < rx_len; ++i) {
-            if (rx_data[i] < 0x20 || rx_data[i] >= 0x7f) {
-                rx_data[i] = '.';
-            }
+    }
+
+    const struct mqtt_connect_client_info_t info =
+    {
+        .client_id = MQTT_CLIENT_ID,
+#ifdef MQTT_PUBLISH_PASSWORD
+        .client_user = MQTT_PUBLISH_USER,
+        .client_pass = MQTT_PUBLISH_PASSWORD,
+#endif
+        .keep_alive = MQTT_KEEPALIVE_S
+    };
+    g_connection_time_ms = now_ms;
+    g_connection_state = CONNECTION_CONNECTING;
+    const err_t result = mqtt_client_connect(
+        gp_client, &broker_addr, MQTT_BROKER_PORT, connection_cb, NULL, &info);
+    if (ERR_OK != result)
+    {
+        tm_printf((UB *)"mqtt: mqtt_client_connect failed, err=%d\n",
+                  (int)result);
+        defer_connection_retry();
+    }
+}
+
+void mqtt_utk_link_down(void)
+{
+    if (NULL != gp_client)
+    {
+        mqtt_disconnect(gp_client);
+    }
+    sys_untimeout(heartbeat_timeout, NULL);
+    g_connection_state = CONNECTION_IDLE;
+#if APP_COURSE_RUN
+    g_map_expected = 0U;
+#endif
+}
+
+void mqtt_utk_poll(void)
+{
+    const uint32_t now_ms = sys_now();
+    const uint32_t elapsed_ms = now_ms - g_connection_time_ms;
+    if ((NULL == gp_client) || !mqtt_client_is_connected(gp_client))
+    {
+        if ((CONNECTION_CONNECTING == g_connection_state) &&
+            (MQTT_CONNECT_TIMEOUT_MS <= elapsed_ms))
+        {
+            tm_printf((UB *)"mqtt: connection attempt timed out; retrying\n");
+            mqtt_disconnect(gp_client);
+            defer_connection_retry();
         }
-		rx_data[rx_len] = '\0';
-		tm_printf((UB*)"mqtt: RX [%s] \"%s\"%s\n", rx_topic, rx_data,
-			  rx_truncated? " (truncated)": "");
-	}
-}
+        else if ((CONNECTION_IDLE == g_connection_state) ||
+                 ((CONNECTION_RETRY == g_connection_state) &&
+                  (MQTT_RETRY_MS <= elapsed_ms)))
+        {
+            connect_to_broker(now_ms);
+        }
+        return;
+    }
 
-static void subscribe_done_cb(void *arg, err_t result)
-{
-	(void)arg;
-	if(result == ERR_OK) {
-		tm_printf((UB*)"mqtt: subscribed to " MQTT_TOPIC "\n");
-	} else {
-		tm_printf((UB*)"mqtt: subscribe failed, err=%d\n", (int)result);
-	}
-}
-
-static void mapping_subscribe_done_cb(void *arg, err_t result)
-{
-    (void)arg;
-    tm_printf((UB *)"mqtt: mapping subscription %s [%s]\n",
-              result == ERR_OK ? "ready" : "failed", BARCODE_MAPPING_TOPIC);
-}
-
-static void publish_done_cb(void *arg, err_t result)
-{
-	(void)arg;
-	if(result != ERR_OK) {
-		tm_printf((UB*)"mqtt: publish failed, err=%d\n", (int)result);
-	}
-}
-
-static void heartbeat_timeout(void *arg)
-{
-	static unsigned int	count = 0;
-	UB			payload[48];
-	int			len;
-
-	(void)arg;
+#if APP_COURSE_RUN
     deliver_pending_mapping();
-
-	if(mqtt_client_is_connected(client)) {
-		len = tm_sprintf(payload, (const UB*)"hb %u", count++);
-		tm_printf((UB*)"mqtt: TX [" MQTT_TOPIC "] \"%s\"\n", payload);
-		(void)mqtt_publish(client, MQTT_TOPIC, payload, (u16_t)len,
-				   0 /* qos */, 0 /* retain */,
-				   publish_done_cb, NULL);
-	}
-
-	/* Re-arms itself every call -- mqtt.c's connection callback (below)
-	 * only starts this chain once, on the transition into MQTT_CONNECT_
-	 * ACCEPTED, so there is exactly one heartbeat chain alive at a time. */
-	sys_timeout(MQTT_UTK_HEARTBEAT_MS, heartbeat_timeout, NULL);
-}
-
-static void retry_timeout(void *arg)
-{
-	(void)arg;
-	connecting = 0;
-	mqtt_utk_start();
-}
-
-static void connection_cb(mqtt_client_t *c, void *arg, mqtt_connection_status_t status)
-{
-	(void)c;
-	(void)arg;
-
-	if(status == MQTT_CONNECT_ACCEPTED) {
-		err_t	err;
-
-		/* No longer *connecting* -- clear the guard so that if this
-		 * connection later drops, the poll loop's mqtt_utk_start() call
-		 * is allowed to reconnect. Leaving it set would wedge the client
-		 * permanently after the first disconnect. */
-		connecting = 0;
-
-		tm_printf((UB*)"mqtt: connected to " MQTT_BROKER_IP "\n");
-
-		/* Subscribe to the same topic this client publishes to, so every
-		 * heartbeat comes back from the broker and is printed by
-		 * incoming_data_cb(). A matching RX for each TX is end-to-end
-		 * proof of the round trip without needing mosquitto_sub on the
-		 * broker host. Callbacks must be registered before subscribing,
-		 * or the first delivery has nowhere to go. */
-		mqtt_set_inpub_callback(client, incoming_publish_cb,
-					incoming_data_cb, NULL);
-
-		err = mqtt_subscribe(client, MQTT_TOPIC, 0 /* qos */,
-				     subscribe_done_cb, NULL);
-		if(err != ERR_OK) {
-			tm_printf((UB*)"mqtt: mqtt_subscribe() failed, err=%d\n",
-				  (int)err);
-		}
-        err = mqtt_subscribe(client, BARCODE_MAPPING_TOPIC, 1, mapping_subscribe_done_cb, NULL);
-        if (err != ERR_OK)
-            tm_printf((UB *)"mqtt: mapping subscribe failed, err=%d\n", (int)err);
-
-		/* Drop any chain left over from a previous connection before
-		 * arming a new one. Each reconnect would otherwise add another
-		 * self-perpetuating heartbeat, and every one of them holds a
-		 * MEMP_SYS_TIMEOUT slot until the pool is exhausted. */
-		sys_untimeout(heartbeat_timeout, NULL);
-		sys_timeout(MQTT_UTK_HEARTBEAT_MS, heartbeat_timeout, NULL);
-	} else {
-		/* mqtt_client_connect() reconnects on its own for a dropped
-		 * keepalive; a rejected/never-established connection does not
-		 * retry itself, so do that here -- on a delay, so a broker
-		 * that keeps rejecting (e.g. bad client ID) can't turn this
-		 * into a tight reconnect loop. */
-		tm_printf((UB*)"mqtt: connection status %d, retrying in %ds\n",
-			  (int)status, MQTT_UTK_RETRY_MS / 1000);
-		sys_timeout(MQTT_UTK_RETRY_MS, retry_timeout, NULL);
-	}
-}
-
-void mqtt_utk_start(void)
-{
-	struct mqtt_connect_client_info_t	client_info = {0};
-	err_t					err;
-
-	if(connecting || (client != NULL && mqtt_client_is_connected(client))) {
-		return;
-	}
-
-	if(client == NULL) {
-		client = mqtt_client_new();
-		if(client == NULL) {
-			tm_printf((UB*)"mqtt: mqtt_client_new() failed\n");
-			return;
-		}
-	}
-
-	if(!ip4addr_aton(MQTT_BROKER_IP, ip_2_ip4(&broker_addr))) {
-		tm_printf((UB*)"mqtt: bad MQTT_BROKER_IP\n");
-		return;
-	}
-	IP_SET_TYPE(&broker_addr, IPADDR_TYPE_V4);
-
-	client_info.client_id = MQTT_CLIENT_ID;
-	client_info.keep_alive = MQTT_UTK_KEEPALIVE_S;
-
-	connecting = 1;
-	err = mqtt_client_connect(client, &broker_addr, MQTT_BROKER_PORT,
-				  connection_cb, NULL, &client_info);
-	if(err != ERR_OK) {
-		tm_printf((UB*)"mqtt: mqtt_client_connect() failed, err=%d\n", (int)err);
-		connecting = 0;
-	}
+#endif
+#if !APP_TEST
+    if (ROBOT_TELEMETRY_PERIOD_MS <= now_ms - g_last_telemetry_ms)
+    {
+        uint8_t packet[ROBOT_TELEMETRY_SIZE];
+        g_last_telemetry_ms = now_ms;
+        if (robot_telemetry_encode(packet, now_ms))
+        {
+            (void)mqtt_publish(gp_client, MQTT_TELEMETRY_TOPIC, packet,
+                               sizeof(packet), 0U, 0U, NULL, NULL);
+        }
+    }
+#endif
 }

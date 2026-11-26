@@ -38,7 +38,7 @@ Test IDs never change and are never reused, even if a test is dropped.
    cd build_make
    make TEST=1 -j8        # -> mtk3pico_smp1_usb_cdc_wifi_test.uf2
    ```
-   The test image runs every subsystem's tests at power-up and prints one
+   The test image runs the configured startup tests at power-up and prints one
    `[TEST] <ID> PASS|FAIL` line per check. (A normal `make` leaves the tests out.)
 4. **Save the console output** to `logs/`, named `YYYY-MM-DD_<what>.txt`:
    ```sh
@@ -72,3 +72,30 @@ the test's result row. `videos/README.md` explains how.
 - **A FAIL needs a note** saying what went wrong and, later, which commit fixed it.
 - Before merging a change into `main`, re-run your subsystem's unit tests.
   Before a demo or hand-in, run every test and record the full set.
+
+
+## Host regression tests
+
+From the firmware repository root, run `python -B testing/host/run.py` with
+Python 3.11+, GCC, Streamlit and Paho MQTT installed. Set `CC` for another
+C99 compiler. The broker tests use the installed Windows Mosquitto tools
+and a temporary loopback listener. Set `SE05_MOSQUITTO` to the full path to
+`mosquitto.exe` if it is installed elsewhere. Those tests report a skip
+if Mosquitto is unavailable.
+
+The suite exercises junction odometry and signed pivot targets, the hump
+estimator, lift and overturn decisions, course map validation and run locking,
+the firmware's exact telemetry bytes, all four dashboard frame versions, and
+MQTT account permissions. The on-target S5 geometry checks also run with
+`TEST=1`. Hardware procedures and results live in the subsystem and system logs.
+
+
+## C review checks
+
+The reference is [BARR-C:2018](https://barrgroup.com/sites/default/files/barr_c_coding_standard_2018.pdf).
+Review complete control blocks, integer conversions, initialization, and
+which task owns each shared value. The junction geometry, vehicle controller,
+route map, telemetry encoder and MQTT adapter use spaces and an 80-column
+limit. The host runner builds the tested C modules in C99 mode with warnings
+treated as errors. Production uses the Pico toolchain's GNU C extensions for
+the SDK, T-Kernel interfaces, atomic operations and weak symbols.

@@ -14,6 +14,7 @@
 #include "subsystem2_test.h"
 #include "subsystem2.h"
 #include "drv_motor.h"
+#include "../../config/sensor_calibration.h"
 #include "drv_encoder.h"
 
 #if APP_TEST
@@ -515,8 +516,10 @@ static test_counts_t run_test_group_motor_polarity (void)
 {
     int32_t test_pass_ = 0;
     int32_t test_fail_ = 0;
+    const bool left_forward_on_in1 = MOTOR_LEFT_POLARITY > 0;
+    const bool right_forward_on_in1 = MOTOR_RIGHT_POLARITY > 0;
 
-    /* Tests S2-U15 & S2-U16: Left motor forward routes to IN1, grounds IN2. */
+    /* Tests S2-U15 & S2-U16: Left motor forward applies its configured polarity. */
     {
         drv_motor_init();
         drv_motor_set_speed(4500, 0);
@@ -527,13 +530,13 @@ static test_counts_t run_test_group_motor_polarity (void)
         /* Cast extracts 16-bit channel B compare field. */
         uint16_t const in_two  = (uint16_t)((cc_left >> 16U) & 0xFFFFUL);
 
-        TEST_CHECK("S2-U15", 4500U == in_one,
-            "Left forward routes duty to IN1");
-        TEST_CHECK("S2-U16", 0U == in_two,
-            "Left forward grounds IN2 to 0");
+        TEST_CHECK("S2-U15", (left_forward_on_in1 ? 4500U : 0U) == in_one,
+            "Left forward uses configured IN1 duty");
+        TEST_CHECK("S2-U16", (left_forward_on_in1 ? 0U : 4500U) == in_two,
+            "Left forward uses configured IN2 duty");
     }
 
-    /* Tests S2-U17 & S2-U18: Left motor reverse grounds IN1, routes to IN2. */
+    /* Tests S2-U17 & S2-U18: Left motor reverse swaps the driven and grounded inputs. */
     {
         drv_motor_set_speed(-4500, 0);
 
@@ -543,13 +546,13 @@ static test_counts_t run_test_group_motor_polarity (void)
         /* Cast extracts 16-bit channel B compare field. */
         uint16_t const in_two  = (uint16_t)((cc_left >> 16U) & 0xFFFFUL);
 
-        TEST_CHECK("S2-U17", 0U == in_one,
-            "Left reverse grounds IN1 to 0");
-        TEST_CHECK("S2-U18", 4500U == in_two,
-            "Left reverse routes duty to IN2");
+        TEST_CHECK("S2-U17", (left_forward_on_in1 ? 0U : 4500U) == in_one,
+            "Left reverse uses configured IN1 duty");
+        TEST_CHECK("S2-U18", (left_forward_on_in1 ? 4500U : 0U) == in_two,
+            "Left reverse uses configured IN2 duty");
     }
 
-    /* Tests S2-U19 & S2-U20: Right motor forward routes to IN1, grounds IN2. */
+    /* Tests S2-U19 & S2-U20: Right motor forward applies its configured polarity. */
     {
         drv_motor_set_speed(0, 4500);
 
@@ -559,13 +562,13 @@ static test_counts_t run_test_group_motor_polarity (void)
         /* Cast extracts 16-bit channel B compare field. */
         uint16_t const in_two   = (uint16_t)((cc_right >> 16U) & 0xFFFFUL);
 
-        TEST_CHECK("S2-U19", 4500U == in_one,
-            "Right forward routes duty to IN1");
-        TEST_CHECK("S2-U20", 0U == in_two,
-            "Right forward grounds IN2 to 0");
+        TEST_CHECK("S2-U19", (right_forward_on_in1 ? 4500U : 0U) == in_one,
+            "Right forward uses configured IN1 duty");
+        TEST_CHECK("S2-U20", (right_forward_on_in1 ? 0U : 4500U) == in_two,
+            "Right forward uses configured IN2 duty");
     }
 
-    /* Tests S2-U21 & S2-U22: Right motor reverse grounds IN1, routes to IN2. */
+    /* Tests S2-U21 & S2-U22: Right motor reverse swaps the driven and grounded inputs. */
     {
         drv_motor_set_speed(0, -4500);
 
@@ -575,30 +578,30 @@ static test_counts_t run_test_group_motor_polarity (void)
         /* Cast extracts 16-bit channel B compare field. */
         uint16_t const in_two   = (uint16_t)((cc_right >> 16U) & 0xFFFFUL);
 
-        TEST_CHECK("S2-U21", 0U == in_one,
-            "Right reverse grounds IN1 to 0");
-        TEST_CHECK("S2-U22", 4500U == in_two,
-            "Right reverse routes duty to IN2");
+        TEST_CHECK("S2-U21", (right_forward_on_in1 ? 0U : 4500U) == in_one,
+            "Right reverse uses configured IN1 duty");
+        TEST_CHECK("S2-U22", (right_forward_on_in1 ? 4500U : 0U) == in_two,
+            "Right reverse uses configured IN2 duty");
     }
 
     /* Tests S2-U23 & S2-U24: Left and Right motor wrap saturation clamping. */
     {
         drv_motor_set_speed(30000, 0);
 
-        /* Cast extracts 16-bit channel A compare value. */
-        uint16_t const duty_left = (uint16_t)(TEST_REG_PWM_CH4_CC & 0xFFFFUL);
+        const uint32_t left_compare = left_forward_on_in1 ? MOTOR_PWM_WRAP_COUNT :
+            (MOTOR_PWM_WRAP_COUNT << 16U);
 
         TEST_CHECK("S2-U23",
-                   MOTOR_PWM_WRAP_COUNT == duty_left,
+                   left_compare == TEST_REG_PWM_CH4_CC,
                    "Left motor duty clamps at MOTOR_PWM_WRAP_COUNT (12500)");
 
         drv_motor_set_speed(0, 30000);
 
-        /* Cast extracts 16-bit channel A compare value. */
-        uint16_t const duty_right = (uint16_t)(TEST_REG_PWM_CH5_CC & 0xFFFFUL);
+        const uint32_t right_compare = right_forward_on_in1 ? MOTOR_PWM_WRAP_COUNT :
+            (MOTOR_PWM_WRAP_COUNT << 16U);
 
         TEST_CHECK("S2-U24",
-                   MOTOR_PWM_WRAP_COUNT == duty_right,
+                   right_compare == TEST_REG_PWM_CH5_CC,
                    "Right motor duty clamps at MOTOR_PWM_WRAP_COUNT (12500)");
         drv_motor_brake();
     }

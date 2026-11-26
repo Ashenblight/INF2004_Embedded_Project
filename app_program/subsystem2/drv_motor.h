@@ -9,6 +9,7 @@
 #ifndef DRV_MOTOR_H
 #define DRV_MOTOR_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Set 10 kHz PWM wrap count at 125 MHz system clock. */
@@ -37,6 +38,10 @@ void drv_motor_init (void);
  * @brief Apply active dynamic braking by pulling both H-bridge inputs LOW.
  */
 void drv_motor_brake (void);
+
+/* Force brake levels at the pads until the MCU is reset. */
+void drv_motor_latch_stop (void);
+bool drv_motor_stop_latched (void);
 
 /**
  * @brief Place H-bridge outputs into high-Z coasting mode.

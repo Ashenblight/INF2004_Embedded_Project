@@ -13,7 +13,7 @@ Define a test here before running it. Test IDs never change.
 | S3-U01 | statistics self-consistent (min ≤ max, 0..100) | | auto | `subsystem3_test.c` | `[TEST] S3-U01 PASS` |
 
 *Method:* **auto** = `TEST_CHECK` in code, result printed on the console;
-**manual** = a person observes the result (LED, scope, meter, phone app…).
+**manual** = a person observes the result (LED, oscilloscope, or meter).
 
 ## Results
 

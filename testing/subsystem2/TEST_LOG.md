@@ -14,7 +14,7 @@ Define a test here before running it. Test IDs never change.
 | S2-U02 | free slots and free blocks within pool size | IF-02 | auto | `subsystem2_test.c` | `[TEST] S2-U02 PASS` |
 
 *Method:* **auto** = `TEST_CHECK` in code, result printed on the console;
-**manual** = a person observes the result (LED, scope, meter, phone app…).
+**manual** = a person observes the result (LED, oscilloscope, or meter).
 
 ## Results
 

@@ -1,16 +1,10 @@
-**Barcode: the five team connections**
+# Barcode connections
 
-The production GPIO/timer implementation is fully present in `barcode_port.c`. Nothing needs uncommenting. Computer-test hardware is in `testing/subsystem3/host_barcode_port.c`, outside the application source tree. The encoder adapter calls the existing Buddy 2 API when Motion Control is linked.
+Connect the sensor's `DO` to GP28 on Grove 7, `VCC` to `3V3`, and `GND` to common ground. GP28 has an internal pull-up for an open-collector output. Motion Control configures the other contact, GP7, as right encoder B. Sylvester reports that GP7 has no sensor connected on the current harness. The module sets its own switching threshold. Use `BARCODE_BLACK_HIGH` in `config/sensor_calibration.h` to change the digital polarity.
 
-| Connection | What to supply |
-|---|---|
-| Real encoder | Link Buddy 2 Motion Control. `barcode_port.c` calls `motion_get_odometry(&left_ticks, &right_ticks)` and averages the two live counts. |
-| Incoming MQTT mapping | The network-owner receiver subscribes to `mtk3smp-pico/cmd/test`, assembles one complete binary payload, then calls `barcode_mapping_apply_mqtt(payload, length)`. GP20 Start waits for an accepted map. No direct MQTT call is needed in Barcode Task. |
-| Events to Vehicle Controller | In initialisation, after `subsystem3_init()` and before `subsystem3_start()`, call `barcode_task_bind_controller(nav_buffer_id, controller_flag_id, barcode_event_bit, barcode_fault_bit)`. Also call line_task_bind_controller() for the new junction source, using the same VC-owned buffer/flag and chosen masks. VC receives/dispatches both event types. |
-| Scan permission | From VC's normal task loop, call `barcode_task_set_enabled(true)` only for the authorised run. Disable on cancellation/STOP. Check return codes; retry `E_TMOUT` later if hardware capture is not ready yet. Do not spin at priority1 waiting for the worker. |
-| Hardware/calibration | Confirm GP4 and black polarity, reserve RP2040 hardware alarm2 exclusively, and set encoder-width limits from actual wheel/print measurements in `barcode_config.h`. Current capture is every500µs; IRQ priority3 matches this template's scheduler. An already armed/enabled alarm is rejected with `E_BUSY`. |
+The S3 worker uses GP28 as a digital input and owns RP2040 hardware alarm 2. It starts at boot, scans while parked or driving, and reports completed optical scans immediately. The Vehicle Controller uses a fresh result from the current route segment when it reaches a junction. GP20 controls motion. The MQTT route map is independent of optical detection.
 
-**Encoder contract**
+**Historical encoder contract for simulated tests**
 
 The adapter fills the existing capture structure:
 
@@ -57,4 +51,4 @@ VC retains one pending mapped instruction until a junction, checks `barcode_task
 
 Build `TEST=0` for physical scanning. `TEST=1` deliberately runs simulated encoder-distance selftests instead of acquiring real sensor data. The project's makefile discovers `barcode_port.c` automatically; no CMake file or source uncommenting is required.
 
-After these connections and calibration, the implemented path is GP4+encoder → timer capture → ring buffer → barcode worker → A–Z decoder → protected runtime mapping → packed navigation event. Software tests exercise this path with mocked hardware; actual optical/encoder accuracy, IRQ latency and whole-car stopping still need a hardware run.
+The live hardware path is GP28 digital input, timed optical transitions, barcode worker, and one-use scan consumption by the Vehicle Controller.

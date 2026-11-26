@@ -20,6 +20,10 @@ IMPORT void subsystem2_run_live_demo (void);
  */
 IMPORT void subsystem2_test (void);
 
+#if APP_TURN_TEST
+IMPORT ER subsystem2_run_turn_test(void);
+#endif
+
 #endif /* SUBSYSTEM2_TEST_H */
 
 /*** end of file ***/

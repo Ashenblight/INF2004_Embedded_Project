@@ -42,7 +42,7 @@ No binding means junctions still classify, but delivery faults and ordinary stee
 | 1 | Type0x23 = CROSS_JUNCTION |
 | 2-3 | Crossing ID uint16; diagnostic modulo65536 |
 | 4-7 | Line-permission generation uint32; nonzero, never wraps |
-| 8-11 | Detection time: tk_get_otm low32 milliseconds |
+| 8-11 | Detection time in milliseconds from the monotonic hardware clock, low 32 bits |
 
 Golden vector: `02 23 12 34 01 02 03 04 11 22 33 44`.
 

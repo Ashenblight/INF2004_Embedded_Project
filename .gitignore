@@ -16,6 +16,9 @@ build/
 # to config/wifi_secrets.h and fill in your own network's SSID/password.
 config/wifi_secrets.h
 
+# Local settings for the Windows MQTT launcher
+/mqtt.env
+
 # Videos are shared as unlisted YouTube links (videos/README.md), never committed
 *.mp4
 *.mov

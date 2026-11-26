@@ -11,13 +11,15 @@ typedef struct
     uint8_t letter; /* Best candidate, or BARCODE_NO_LETTER if no usable symbol. */
     uint8_t score, margin; /* Fit scores, not calibrated probabilities. */
     bool accepted, reversed, complete;
+    bool ranked_widths; /* Exact pattern from separated narrow/wide groups. */
 } barcode_guess_t;
 
-/* Raw time-width fallback. First run is black. Zero mask considers all A-Z.
- * Require a reliable start and nine completed letter runs. A truncated trace
- * can be used only if a complete frame is present before the truncation. */
+/* Run-width confidence matcher. Width units may be microseconds or encoder ticks.
+ * First run is black. A zero mask considers all A-Z. */
 barcode_guess_t barcode_guess_runs(const uint32_t *widths, unsigned count,
                                   bool truncated, uint32_t allowed_letters);
+/* An optical frame has 29 completed alternating runs, starting and ending black. */
+barcode_guess_t barcode_guess_frame(const uint32_t widths[BARCODE_FRAME_ELEMENTS]);
 
 typedef struct
 {
@@ -53,6 +55,10 @@ typedef struct
     uint32_t leading_quiet_ticks;
     uint16_t elements[BARCODE_FRAME_ELEMENTS];
     uint32_t trailing_quiet_needed;
+    uint32_t allowed_letters; /* Zero means all A-Z; otherwise a 26-bit candidate mask. */
+    uint8_t last_letter; /* Best candidate even when confidence rejects it. */
+    uint8_t last_score, last_margin; /* Most recent candidate's fit score and margin. */
+    uint8_t completed_score, completed_margin; /* Confidence copied out on BARCODE_CHARACTER. */
     barcode_character_t pending;
     uint8_t count;
     uint8_t phase;
@@ -65,6 +71,8 @@ typedef struct
 bool barcode_decoder_init(barcode_decoder_t *decoder, const barcode_decoder_config_t *config);
 void barcode_decoder_reset(barcode_decoder_t *decoder);
 bool barcode_decoder_in_progress(const barcode_decoder_t *decoder);
+/* Set the mapped candidate letters for the next frame. Zero enables all A-Z. */
+void barcode_decoder_set_allowed_letters(barcode_decoder_t *decoder, uint32_t allowed_letters);
 /* Feed NORMALISED black/white plus an encoder-position snapshot from the SAME
  * observation. Include transitions and distance updates while white so the
  * trailing quiet zone can be confirmed. One owner task calls this interface.

@@ -250,10 +250,17 @@ Each option goes through the same steps:
 
 The makefile also has `NET=lwip` and `MQTT=1` (TCP/IP and MQTT over WiFi).
 They need the SDK's `lib/lwip` submodule and a `config/wifi_secrets.h`
-(copy `config/wifi_secrets.example.h`). This guide does not cover them.
+(copy `config/wifi_secrets.example.h`). The MQTT profiles support the Windows
+telemetry dashboard and the course barcode map. [MQTT setup](docs/mqtt-telemetry.md)
 
 ---
 
 *micro T-Kernel 3.0 © Ken Sakamura / TRON Forum, distributed under the
 T-License 2.2. This dual-core RP2040 port is derived from the official
 μT-Kernel 3.0 BSP (`tron-forum/mtk3_bsp`, branch `pico_rp2040`).*
+
+
+## Host regression tests
+
+Run `python -B testing/host/run.py` from the repository root.
+See [Testing](testing/README.md) for dependencies and on-target checks.

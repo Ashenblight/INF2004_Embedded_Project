@@ -100,7 +100,7 @@ ER result = line_task_set_following_enabled(true);
 
 Before a stop or a manoeuvre that takes control away from routine line following, Vehicle Controller calls the same function with `false` and coordinates Motion Control's mode/stop command. This setter alone does not physically stop the motors.
 
-Enabling invalidates the old sample. The getter can therefore fail until a NEW sample arrives. The line task currently samples every 10 ms; samples older than 30 ms are rejected. These limits are defined in `line_task.h`, not values Motion needs to duplicate.
+Enabling invalidates the old sample. The getter can therefore fail until a new sample arrives. The line task and motion control use the shared 10 ms period in `config/robot_timing.h`. The getter rejects samples older than three periods (30 ms) using the RP2040 clock.
 
 **5. Handle the return value**
 

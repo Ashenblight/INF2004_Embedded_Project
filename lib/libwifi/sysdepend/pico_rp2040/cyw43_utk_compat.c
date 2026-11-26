@@ -11,7 +11,7 @@
 #include "hardware/claim.h"
 #include "hardware/clocks.h"
 #include "hardware/irq.h"
-#include "hardware/structs/timer.h"
+#include <sys/sysdepend/cpu/rp2040/timer.h>
 #include "cyw43.h"
 
 extern int32_t tk_dly_tsk(uint32_t delay);
@@ -109,13 +109,7 @@ uint32_t clock_get_hz(clock_handle_t clock)
 
 uint64_t time_us_64(void)
 {
-    uint32_t hi0, lo, hi1;
-    do {
-        hi0 = timer_hw->timerawh;
-        lo = timer_hw->timerawl;
-        hi1 = timer_hw->timerawh;
-    } while(hi0 != hi1);
-    return ((uint64_t)hi0 << 32) | lo;
+    return rp2040_timer_us64();
 }
 
 void cyw43_delay_ms(uint32_t ms)

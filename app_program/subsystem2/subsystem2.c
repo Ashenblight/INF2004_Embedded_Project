@@ -10,16 +10,17 @@
 #include "subsystem2.h"
 #include "drv_motor.h"
 #include "drv_encoder.h"
+#include "../../config/sensor_calibration.h"
 
 /* Control and Calibration Constants */
 #define TARGET_BASE_CRUISE_TICKS     (1)   /* Set base target to 1 tick. */
+#define MILLITICKS_PER_TICK          (1000)
 #define KP_SPEED                     (320)
-#define KI_SPEED                     (35)
-#define INTEGRAL_CLAMP               (150)
-#define ACTIVE_BRAKE_TICKS           (10U) /* Hold active brake for 100 ms. */
-#define STOP_TIMEOUT_TICKS           (15U)
-#define TICKS_PER_MM                 (6)   /* Calibrate at 6 ticks per mm. */
-#define TICKS_PER_DEGREE             (2)   /* Calibrate at 2 ticks per deg. */
+#define KI_SPEED                     (8)
+#define SPEED_FILTER_DIVISOR         (4)
+#define SPEED_INTEGRAL_PWM_LIMIT     (1500)
+#define ACTIVE_BRAKE_US              (100000U)
+#define STOP_TIMEOUT_US              (150000U)
 #define MAX_SPEED_DUTY               (100U)
 #define DEFAULT_SPEED_DUTY           (50U)
 #define MAX_DISTANCE_MM              (1023U)
@@ -28,7 +29,7 @@
 #define REVERSE_ANGLE_MARKER         (-1)
 #define DELTA_TICK_MAX               (127)
 #define DELTA_TICK_MIN               (-128)
-#define TASK_PERIOD_MS               (10)
+#define TASK_PERIOD_US               (ROBOT_CONTROL_PERIOD_MS * 1000)
 #define MOTION_TASK_PRIORITY         (5)
 #define CMD_MBF_BUFFER_BYTES         (64)
 #define FLAG_STOP_REQUEST            (0x00000001U)
@@ -36,15 +37,17 @@
 #define FLAG_STOPPED_CONFIRMED       (0x00000002U) /* Signal controller stop. */
 #define FLAG_MOVEMENT_COMPLETE       (0x00000004U) /* Signal move completion. */
 
-/* Base cruise: 1200 milliticks per 10 ms equals 2.0 cm/s. */
-#define CRUISE_SPEED_MILLITICKS_10MS (1200)
 #define MOTOR_DEADBAND_MIN_PWM       (1750)
-#define LINE_STEER_RETURN_STEP_PWM   (175)
-#define LINE_STEER_GAIN              (35)
+#define LINE_STEER_STEP_PERCENT      (10)
 #define MANOEUVRE_STRAIGHT_BASE_PWM  (1750)
 #define MANOEUVRE_STRAIGHT_GAIN      (12)
 #define MANOEUVRE_TURN_BASE_PWM      (1650)
 #define MANOEUVRE_TURN_GAIN          (10)
+#define BALANCE_PWM_PER_TICK         (16)
+#define SHORT_PIVOT_MAX_COMMAND_DEG  (45)
+#define PIVOT_ASSIST_WAIT_UPDATES    ((200U + ROBOT_CONTROL_PERIOD_MS - 1U) / ROBOT_CONTROL_PERIOD_MS)
+#define PIVOT_ASSIST_PWM             (400)
+#define PIVOT_ASSIST_MAX_PWM         (2650)
 
 /* Active Manoeuvre Context Enumeration */
 typedef enum
@@ -54,6 +57,20 @@ typedef enum
     MANOEUVRE_DIR_TURN_CW  = 2,
     MANOEUVRE_DIR_TURN_CCW = 3
 } manoeuvre_dir_t;
+
+typedef struct
+{
+    int32_t speed_milliticks;
+    int32_t integral_millipwm;
+} cruise_wheel_t;
+
+typedef struct
+{
+    cruise_wheel_t left;
+    cruise_wheel_t right;
+    int32_t steering_percent;
+    bool line_mode;
+} cruise_control_t;
 
 /**
  * NOTE: Compatibility handles and white-box test symbols below preserve their
@@ -69,44 +86,63 @@ EXPORT volatile int8_t            s_latest_steering_offset = 0;
 /* Internal Subsystem 2 Task & State Handles (BARR-C Rule 7.1.j/m/n/o) */
 static ID                         gh_flg_motion            = 0;
 static ID                         gh_tskid_motion          = 0;
+static ID                         g_motion_cyclic_id;
 static motion_state_t             g_current_state          = MOTION_STATE_IDLE;
-static volatile bool              gb_line_mode_authorized  = false;
+/* The motion task owns both brake timing values. */
+static uint32_t                   g_brake_started_us;
+static uint32_t                   g_brake_elapsed_us;
+static bool                       gb_line_mode_authorized  = false;
 static volatile bool              gb_emergency_latched     = false;
-static volatile motion_status_packed_t g_latest_motion_status = {0};
+static uint32_t                   g_latest_motion_status = 0U;
+static volatile uint32_t          g_max_control_gap_us    = 0U;
 static manoeuvre_dir_t            g_manoeuvre_dir          = MANOEUVRE_DIR_FWD;
+/* Compare the sum of both wheels against twice the per-wheel target. */
 static int32_t                    g_manoeuvre_target_ticks = 0;
 static int32_t                    g_manoeuvre_accumulated  = 0;
+static struct
+{
+    bool enabled;
+    bool short_pivot;
+    int32_t left_ticks;
+    int32_t right_ticks;
+    unsigned left_idle_updates;
+    unsigned right_idle_updates;
+} g_balanced_move;
 static uint8_t                    g_active_speed_duty      = DEFAULT_SPEED_DUTY;
 
 /* Private Function Prototypes (BARR-C Rule 4.3.b) */
 static void    flush_command_buffer (void);
 static void    parse_and_apply_command (
                    motion_command_packed_t const * const p_cmd);
-static int16_t line_drive_pwm (int32_t target_ticks,
-                               int8_t  measured_ticks,
-                               int32_t steering_pwm);
+static int16_t line_drive_pwm (cruise_wheel_t *wheel,
+                               int32_t target_milliticks,
+                               int32_t measured_milliticks);
 static void    update_line_steering (bool            b_line_mode,
-                                     int32_t * const p_line_steer_pwm);
+                                     int32_t * const steering_percent);
 static void    apply_manoeuvre_drive (void);
-static void    process_emergency_events (uint32_t * const p_brake_timer);
+static void    process_emergency_events (void);
 static void    handle_state_idle (void);
 static void    handle_state_continuous (bool            b_line_mode,
                                         int8_t          delta_l,
                                         int8_t          delta_r,
-                                        int32_t * const p_line_steer_pwm);
+                                        uint32_t        sample_us,
+                                        cruise_control_t *cruise);
 static void    handle_state_manoeuvre (int8_t           delta_l,
-                                       int8_t           delta_r,
-                                       uint32_t * const p_brake_timer);
-static void    handle_state_stopping (uint32_t * const p_brake_timer);
+                                       int8_t           delta_r);
+static void    handle_state_stopping (void);
 static void    handle_state_stopped (void);
 static void    update_telemetry_snapshot (int8_t   delta_l,
-                                          int8_t   delta_r,
-                                          uint32_t brake_timer);
+                                          int8_t   delta_r);
 static void    motion_control_task (INT stacd, void * const p_exinf);
 
 /* ========================================================================= */
 /* Public Procedural API Implementations                                     */
 /* ========================================================================= */
+
+static bool motion_drive_inhibited (void)
+{
+    return gb_emergency_latched || drv_motor_stop_latched();
+}
 
 /**
  * @brief Enqueue a discrete forward movement command.
@@ -114,11 +150,11 @@ static void    motion_control_task (INT stacd, void * const p_exinf);
  * @param[in] speed_duty  Target duty cycle percentage (0-100).
  * @return E_OK on success, or uT-Kernel error code.
  */
-ER motion_move_forward (uint16_t distance_mm, uint8_t speed_duty)
+static ER enqueue_forward (uint16_t distance_mm, uint8_t speed_duty, bool balance_wheels)
 {
     ER result = E_SYS;
 
-    if ((s_mbf_motion_cmds > 0) && (!gb_emergency_latched))
+    if ((s_mbf_motion_cmds > 0) && (!motion_drive_inhibited()))
     {
         uint8_t const  clamped_duty = (speed_duty > MAX_SPEED_DUTY)
                                           ? MAX_SPEED_DUTY
@@ -133,6 +169,7 @@ ER motion_move_forward (uint16_t distance_mm, uint8_t speed_duty)
             .speed_duty         = (uint32_t)clamped_duty,
             .target_angle_deg   = motion_cmd_encode_angle(0),
             .target_distance_mm = (uint32_t)clamped_dist,
+            .balance_wheels     = (uint32_t)balance_wheels,
             .reserved           = 0U
         };
 
@@ -146,6 +183,16 @@ ER motion_move_forward (uint16_t distance_mm, uint8_t speed_duty)
     return (result);
 }
 
+ER motion_move_forward (uint16_t distance_mm, uint8_t speed_duty)
+{
+    return enqueue_forward(distance_mm, speed_duty, false);
+}
+
+ER motion_bypass_move_forward (uint16_t distance_mm, uint8_t speed_duty)
+{
+    return enqueue_forward(distance_mm, speed_duty, true);
+}
+
 /**
  * @brief Enqueue a discrete backward movement command.
  * @param[in] distance_mm Target reverse distance in millimetres (0-1023).
@@ -156,7 +203,7 @@ ER motion_move_backward (uint16_t distance_mm, uint8_t speed_duty)
 {
     ER result = E_SYS;
 
-    if ((s_mbf_motion_cmds > 0) && (!gb_emergency_latched))
+    if ((s_mbf_motion_cmds > 0) && (!motion_drive_inhibited()))
     {
         uint8_t const  clamped_duty = (speed_duty > MAX_SPEED_DUTY)
                                           ? MAX_SPEED_DUTY
@@ -190,13 +237,14 @@ ER motion_move_backward (uint16_t distance_mm, uint8_t speed_duty)
  * @brief Enqueue an in-place differential point turn command.
  * @param[in] angle_deg  Signed turn angle in degrees (-180 to +180).
  * @param[in] speed_duty Target duty cycle percentage (0-100).
+ * @param[in] balance_wheels Require both wheels to reach their encoder target.
  * @return E_OK on success, or uT-Kernel error code.
  */
-ER motion_point_turn (int16_t angle_deg, uint8_t speed_duty)
+static ER enqueue_point_turn (int16_t angle_deg, uint8_t speed_duty, bool balance_wheels)
 {
     ER result = E_SYS;
 
-    if ((s_mbf_motion_cmds > 0) && (!gb_emergency_latched))
+    if ((s_mbf_motion_cmds > 0) && (!motion_drive_inhibited()))
     {
         uint8_t const clamped_duty  = (speed_duty > MAX_SPEED_DUTY)
                                           ? MAX_SPEED_DUTY
@@ -223,6 +271,7 @@ ER motion_point_turn (int16_t angle_deg, uint8_t speed_duty)
             .speed_duty         = (uint32_t)clamped_duty,
             .target_angle_deg   = motion_cmd_encode_angle(clamped_angle),
             .target_distance_mm = 0U,
+            .balance_wheels     = (uint32_t)balance_wheels,
             .reserved           = 0U
         };
 
@@ -236,6 +285,16 @@ ER motion_point_turn (int16_t angle_deg, uint8_t speed_duty)
     return (result);
 }
 
+ER motion_point_turn (int16_t angle_deg, uint8_t speed_duty)
+{
+    return enqueue_point_turn(angle_deg, speed_duty, false);
+}
+
+ER motion_balanced_point_turn (int16_t angle_deg, uint8_t speed_duty)
+{
+    return enqueue_point_turn(angle_deg, speed_duty, true);
+}
+
 /**
  * @brief Enqueue a continuous forward cruise command.
  * @param[in] speed_duty Target cruise duty cycle percentage (0-100).
@@ -245,7 +304,7 @@ ER motion_start_continuous (uint8_t speed_duty)
 {
     ER result = E_SYS;
 
-    if ((s_mbf_motion_cmds > 0) && (!gb_emergency_latched))
+    if ((s_mbf_motion_cmds > 0) && (!motion_drive_inhibited()))
     {
         uint8_t const clamped_duty = (speed_duty > MAX_SPEED_DUTY)
                                          ? MAX_SPEED_DUTY
@@ -278,7 +337,7 @@ ER motion_stop (void)
 {
     ER result = E_SYS;
 
-    if (s_mbf_motion_cmds > 0)
+    if ((s_mbf_motion_cmds > 0) && (!drv_motor_stop_latched()))
     {
         /* Cast widens MOTION_CMD_STOP enum to uint32_t bit-field type. */
         motion_command_packed_t cmd =
@@ -316,11 +375,26 @@ void motion_emergency_stop (void)
     drv_motor_brake();
 }
 
+void motion_latch_run_stop (void)
+{
+    drv_motor_latch_stop();
+}
+
+bool motion_run_stop_latched (void)
+{
+    return drv_motor_stop_latched();
+}
+
 /**
  * @brief Release emergency stop interlock to allow subsequent commands.
  */
 void motion_clear_emergency_stop (void)
 {
+    if (drv_motor_stop_latched())
+    {
+        return;
+    }
+
     gb_emergency_latched = false;
 
     if (gh_flg_motion > 0)
@@ -336,8 +410,7 @@ void motion_clear_emergency_stop (void)
  */
 void motion_set_mode_line_following (bool b_is_enabled)
 {
-    gb_line_mode_authorized             = b_is_enabled;
-    g_latest_motion_status.line_mode_en = b_is_enabled ? 1U : 0U;
+    __atomic_store_n(&gb_line_mode_authorized, b_is_enabled, __ATOMIC_RELEASE);
 
     if (!b_is_enabled)
     {
@@ -352,7 +425,7 @@ void motion_set_mode_line_following (bool b_is_enabled)
  */
 void motion_update_steering (int8_t steering_correction)
 {
-    if (gb_line_mode_authorized)
+    if (__atomic_load_n(&gb_line_mode_authorized, __ATOMIC_ACQUIRE))
     {
         s_latest_steering_offset = steering_correction;
     }
@@ -385,23 +458,12 @@ void motion_get_status (motion_status_packed_t * const p_out_status)
 {
     if (NULL != p_out_status)
     {
-        p_out_status->state              = g_latest_motion_status.state;
-        p_out_status->left_motor_mode    =
-            g_latest_motion_status.left_motor_mode;
-        p_out_status->right_motor_mode   =
-            g_latest_motion_status.right_motor_mode;
-        p_out_status->motor_stall_fault  =
-            g_latest_motion_status.motor_stall_fault;
-        p_out_status->left_delta_ticks   =
-            g_latest_motion_status.left_delta_ticks;
-        p_out_status->right_delta_ticks  =
-            g_latest_motion_status.right_delta_ticks;
-        p_out_status->encoder_fault      =
-            g_latest_motion_status.encoder_fault;
-        p_out_status->stop_timeout_fault =
-            g_latest_motion_status.stop_timeout_fault;
-        p_out_status->line_mode_en       = g_latest_motion_status.line_mode_en;
-        p_out_status->reserved           = g_latest_motion_status.reserved;
+        const uint32_t snapshot =
+            __atomic_load_n(&g_latest_motion_status, __ATOMIC_ACQUIRE);
+        __builtin_memcpy(p_out_status, &snapshot, sizeof(snapshot));
+        p_out_status->line_mode_en =
+            __atomic_load_n(&gb_line_mode_authorized, __ATOMIC_ACQUIRE)
+            ? 1U : 0U;
     }
 }
 
@@ -420,7 +482,7 @@ int8_t motion_get_steering_offset (void)
 
 /**
  * @brief Phase 1 initialization: allocate RTOS IPC objects and init drivers.
- * @return E_OK upon initialization completion.
+ * @return E_OK on success or the kernel object creation error.
  */
 EXPORT ER subsystem2_init (void)
 {
@@ -431,8 +493,6 @@ EXPORT ER subsystem2_init (void)
         .iflgptn = 0U
     };
 
-    gh_flg_motion = tk_cre_flg(&cflg);
-
     /* Cast of sizeof to INT required by uT-Kernel T_CMBF structure field. */
     T_CMBF cmbf =
     {
@@ -440,8 +500,6 @@ EXPORT ER subsystem2_init (void)
         .bufsz  = CMD_MBF_BUFFER_BYTES,
         .maxmsz = (INT)sizeof(motion_command_packed_t)
     };
-
-    s_mbf_motion_cmds = tk_cre_mbf(&cmbf);
 
     /* Step 2: Compatibility IPC for Subsystems 3 & 4 */
     T_CSEM csem =
@@ -451,8 +509,6 @@ EXPORT ER subsystem2_init (void)
         .maxsem  = S2_POOL_COUNT
     };
 
-    sem_slots = tk_cre_sem(&csem);
-
     /* Cast of sizeof to INT required by uT-Kernel T_CMPF structure field. */
     T_CMPF cmpf =
     {
@@ -461,39 +517,83 @@ EXPORT ER subsystem2_init (void)
         .blfsz  = (INT)sizeof(SAMPLE_MSG)
     };
 
-    mpf_samples = tk_cre_mpf(&cmpf);
-
-    /* Step 3: Initialize Hardware Drivers */
-    drv_motor_init();
-    drv_encoder_init();
+    gh_flg_motion = tk_cre_flg(&cflg);
+    ER result = gh_flg_motion;
+    if (E_OK < result)
+    {
+        s_mbf_motion_cmds = tk_cre_mbf(&cmbf);
+        result = s_mbf_motion_cmds;
+    }
+    if (E_OK < result)
+    {
+        sem_slots = tk_cre_sem(&csem);
+        result = sem_slots;
+    }
+    if (E_OK < result)
+    {
+        mpf_samples = tk_cre_mpf(&cmpf);
+        result = mpf_samples;
+    }
+    if (E_OK < result)
+    {
+        /* Boot is pinned to core 0, which owns the encoder's GPIO IRQ. */
+        drv_motor_init();
+        drv_encoder_init();
+        result = drv_encoder_start_irq();
+        CHECK(result, "encoder GPIO IRQ setup");
+    }
+    if (result < E_OK)
+    {
+        if (0 < mpf_samples)
+        {
+            CHECK(tk_del_mpf(mpf_samples), "delete motion sample pool");
+        }
+        if (0 < sem_slots)
+        {
+            CHECK(tk_del_sem(sem_slots), "delete motion semaphore");
+        }
+        if (0 < s_mbf_motion_cmds)
+        {
+            CHECK(tk_del_mbf(s_mbf_motion_cmds), "delete motion buffer");
+        }
+        if (0 < gh_flg_motion)
+        {
+            CHECK(tk_del_flg(gh_flg_motion), "delete motion flag");
+        }
+        mpf_samples = 0;
+        sem_slots = 0;
+        s_mbf_motion_cmds = 0;
+        gh_flg_motion = 0;
+        return (result);
+    }
 
     return (E_OK);
 }
 
+uint32_t motion_take_max_control_gap_us (void)
+{
+    UW saved;
+    DI(saved);
+    const uint32_t gap = g_max_control_gap_us;
+    g_max_control_gap_us = 0U;
+    EI(saved);
+    return gap;
+}
+
 /**
- * @brief Phase 2 startup: spawn the 10 ms periodic motion control RTOS task.
- * @return E_OK if task started, or E_SYS on failure.
+ * @brief Phase 2 startup: spawn Motion Control and schedule its periodic wakeup.
+ * @return E_OK if the task started or a kernel error on failure.
  */
 EXPORT ER subsystem2_start (void)
 {
-    ER result = E_OK;
-
-    if (gh_tskid_motion <= 0)
+    if (gh_tskid_motion > 0)
     {
-        /* Priority 5: Highest application task in system. */
-        /* Cast converts task function pointer to uT-Kernel FP type. */
-        gh_tskid_motion = app_start_task((FP)motion_control_task,
-                                         MOTION_TASK_PRIORITY,
-                                         TP_PRC1,
-                                         "motion_task");
-
-        if (gh_tskid_motion <= 0)
-        {
-            result = E_SYS;
-        }
+        return E_OK;
     }
 
-    return (result);
+    gh_tskid_motion = app_start_periodic_task((FP)motion_control_task, MOTION_TASK_PRIORITY,
+        TP_PRC1, "motion_task", ROBOT_CONTROL_PERIOD_MS, &g_motion_cyclic_id);
+    return gh_tskid_motion < E_OK ? gh_tskid_motion : E_OK;
 }
 
 #if APP_TEST
@@ -558,6 +658,14 @@ static void flush_command_buffer (void)
     }
 }
 
+static void begin_active_brake (void)
+{
+    drv_motor_brake();
+    g_brake_started_us = rp2040_timer_us32();
+    g_brake_elapsed_us = 0U;
+    g_current_state = MOTION_STATE_STOPPING;
+}
+
 /**
  * @brief Decode a packed command word and transition the motion state machine.
  * @param[in] p_cmd Pointer to packed command structure.
@@ -572,12 +680,18 @@ static void parse_and_apply_command (
 
     int16_t const decoded_angle =
         motion_cmd_decode_angle(p_cmd->target_angle_deg);
+    g_balanced_move.enabled = false;
+    g_balanced_move.short_pivot = false;
+    g_balanced_move.left_ticks = 0;
+    g_balanced_move.right_ticks = 0;
+    g_balanced_move.left_idle_updates = 0U;
+    g_balanced_move.right_idle_updates = 0U;
 
     /* Casts in case labels match 2-bit unsigned cmd_type field width. */
     switch (p_cmd->cmd_type)
     {
         case (uint32_t)MOTION_CMD_STOP:
-            g_current_state = MOTION_STATE_STOPPING;
+            begin_active_brake();
         break;
 
         case (uint32_t)MOTION_CMD_DRIVE_CONTINUOUS:
@@ -586,8 +700,9 @@ static void parse_and_apply_command (
 
         case (uint32_t)MOTION_CMD_DRIVE_DISTANCE:
             /* Cast to int32_t avoids mixing signed/unsigned in product. */
-            g_manoeuvre_target_ticks =
-                ((int32_t)p_cmd->target_distance_mm) * TICKS_PER_MM;
+            g_balanced_move.enabled = p_cmd->balance_wheels != 0U && decoded_angle >= 0;
+            g_manoeuvre_target_ticks = 2 * ((int32_t)p_cmd->target_distance_mm) *
+                (g_balanced_move.enabled ? OBSTACLE_BYPASS_TICKS_PER_MM : ENCODER_CAL_TICKS_PER_MM);
             g_manoeuvre_accumulated  = 0;
             g_manoeuvre_dir          = (decoded_angle < 0)
                                            ? MANOEUVRE_DIR_BWD
@@ -602,8 +717,10 @@ static void parse_and_apply_command (
                                            ? (int32_t)decoded_angle
                                            : -((int32_t)decoded_angle);
 
-            g_manoeuvre_target_ticks = abs_angle * TICKS_PER_DEGREE;
+            g_manoeuvre_target_ticks = 2 * abs_angle * ENCODER_CAL_TICKS_PER_DEG;
             g_manoeuvre_accumulated  = 0;
+            g_balanced_move.enabled = p_cmd->balance_wheels != 0U;
+            g_balanced_move.short_pivot = abs_angle <= SHORT_PIVOT_MAX_COMMAND_DEG;
             g_manoeuvre_dir          = (decoded_angle >= 0)
                                            ? MANOEUVRE_DIR_TURN_CW
                                            : MANOEUVRE_DIR_TURN_CCW;
@@ -612,30 +729,47 @@ static void parse_and_apply_command (
         break;
 
         default:
-            g_current_state = MOTION_STATE_STOPPING;
+            begin_active_brake();
         break;
     }
 }
 
 /**
- * @brief Calculate feedforward + proportional PWM for continuous driving.
- * @param[in] target_ticks   Target tick count per 10 ms period.
- * @param[in] measured_ticks Measured tick count in current 10 ms period.
- * @param[in] steering_pwm   Signed steering PWM adjustment.
+ * @brief Calculate feedforward plus filtered PI feedback for continuous drive.
+ * @param[in,out] wheel Speed filter and integral correction for this wheel.
+ * @param[in] target_milliticks Target in thousandths of an encoder tick per 10 ms.
+ * @param[in] measured_milliticks Measured wheel rate per 10 ms, positive forward.
  * @return Clamped signed 16-bit PWM command in [0..12500].
  */
-static int16_t line_drive_pwm (int32_t target_ticks,
-                               int8_t  measured_ticks,
-                               int32_t steering_pwm)
+static int16_t line_drive_pwm (cruise_wheel_t *wheel,
+                               int32_t target_milliticks,
+                               int32_t measured_milliticks)
 {
-    /* Reverse counts mean no forward progress during line following. */
-    /* Cast is safe: measured_ticks is positive [1..127]. */
-    int32_t const forward_ticks = (measured_ticks > 0)
-                                      ? (int32_t)measured_ticks
-                                      : 0;
-    int32_t       pwm           = MOTOR_DEADBAND_MIN_PWM +
-                                  (KP_SPEED * (target_ticks - forward_ticks)) +
-                                  steering_pwm;
+    wheel->speed_milliticks += (measured_milliticks -
+                                wheel->speed_milliticks) / SPEED_FILTER_DIVISOR;
+    const int32_t forward_milliticks = wheel->speed_milliticks > 0 ?
+                                      wheel->speed_milliticks : 0;
+    const int32_t error_milliticks = target_milliticks - forward_milliticks;
+    const int32_t base_pwm = MOTOR_DEADBAND_MIN_PWM +
+                             (KP_SPEED * error_milliticks / MILLITICKS_PER_TICK);
+    const int32_t integral_limit = SPEED_INTEGRAL_PWM_LIMIT * MILLITICKS_PER_TICK;
+    int32_t integral = wheel->integral_millipwm + KI_SPEED * error_milliticks;
+    if (integral > integral_limit)
+    {
+        integral = integral_limit;
+    }
+    else if (integral < -integral_limit)
+    {
+        integral = -integral_limit;
+    }
+    const int32_t candidate_pwm = base_pwm + integral / MILLITICKS_PER_TICK;
+    /* Do not build up correction while it would push further into a limit. */
+    if (!((candidate_pwm >= (int32_t)MOTOR_PWM_WRAP_COUNT && error_milliticks > 0) ||
+          (candidate_pwm <= 0 && error_milliticks < 0)))
+    {
+        wheel->integral_millipwm = integral;
+    }
+    int32_t pwm = base_pwm + wheel->integral_millipwm / MILLITICKS_PER_TICK;
 
     /* Cast is safe: MOTOR_PWM_WRAP_COUNT (12500) fits in int32_t. */
     if (pwm > (int32_t)MOTOR_PWM_WRAP_COUNT)
@@ -650,40 +784,58 @@ static int16_t line_drive_pwm (int32_t target_ticks,
 }
 
 /**
- * @brief Update lateral steering PWM with decay return when offset is zero.
+ * @brief Limit how quickly the wheel target split changes between line readings.
  * @param[in]     b_line_mode      True if line-following steering is active.
- * @param[in,out] p_line_steer_pwm Pointer to persistent steering PWM state.
+ * @param[in,out] steering_percent Current signed percentage split.
  */
 static void update_line_steering (bool            b_line_mode,
-                                  int32_t * const p_line_steer_pwm)
+                                  int32_t * const steering_percent)
 {
     if (!b_line_mode)
     {
-        *p_line_steer_pwm = 0;
+        *steering_percent = 0;
     }
     else
     {
-        /* Cast is safe: int8_t offset [-128..127] widens to int32_t. */
-        int32_t const requested_steer =
-            (int32_t)s_latest_steering_offset * LINE_STEER_GAIN;
-
-        if (0 != requested_steer)
+        const int32_t request = motion_get_steering_offset();
+        const int32_t requested_steer = request > 100 ? 100 :
+            (request < -100 ? -100 : request);
+        const int32_t change = requested_steer - *steering_percent;
+        if (change > LINE_STEER_STEP_PERCENT)
         {
-            *p_line_steer_pwm = requested_steer;
+            *steering_percent += LINE_STEER_STEP_PERCENT;
         }
-        else if (*p_line_steer_pwm > LINE_STEER_RETURN_STEP_PWM)
+        else if (change < -LINE_STEER_STEP_PERCENT)
         {
-            *p_line_steer_pwm -= LINE_STEER_RETURN_STEP_PWM;
-        }
-        else if (*p_line_steer_pwm < -LINE_STEER_RETURN_STEP_PWM)
-        {
-            *p_line_steer_pwm += LINE_STEER_RETURN_STEP_PWM;
+            *steering_percent -= LINE_STEER_STEP_PERCENT;
         }
         else
         {
-            *p_line_steer_pwm = 0;
+            *steering_percent = requested_steer;
         }
     }
+}
+
+/* Slow the leading wheel, assist a stuck short pivot, and brake at the target. */
+static int16_t balanced_wheel_pwm(int16_t base_pwm, int32_t ticks, int32_t other_ticks,
+                                  unsigned idle_updates)
+{
+    if (ticks >= g_manoeuvre_target_ticks / 2)
+    {
+        return 0;
+    }
+    if (g_balanced_move.short_pivot && idle_updates >= PIVOT_ASSIST_WAIT_UPDATES)
+    {
+        const int32_t assisted_pwm = (int32_t)base_pwm + PIVOT_ASSIST_PWM;
+        return (int16_t)(assisted_pwm < PIVOT_ASSIST_MAX_PWM ? assisted_pwm : PIVOT_ASSIST_MAX_PWM);
+    }
+    if (ticks <= other_ticks)
+    {
+        return base_pwm;
+    }
+    const int32_t max_trim = base_pwm / 4;
+    const int32_t trim = (ticks - other_ticks) * BALANCE_PWM_PER_TICK;
+    return (int16_t)(base_pwm - (trim < max_trim ? trim : max_trim));
 }
 
 /**
@@ -704,6 +856,19 @@ static void apply_manoeuvre_drive (void)
     /* Cast is safe: value is bounded within [1650..2650]. */
     int16_t const turn_pwm     = (int16_t)raw_turn;
 
+    if (g_balanced_move.enabled)
+    {
+        const bool forward = g_manoeuvre_dir == MANOEUVRE_DIR_FWD;
+        const int direction = g_manoeuvre_dir == MANOEUVRE_DIR_TURN_CCW ? -1 : 1;
+        const int16_t base_pwm = forward ? straight_pwm : turn_pwm;
+        const int16_t left = balanced_wheel_pwm(base_pwm, g_balanced_move.left_ticks,
+                                                g_balanced_move.right_ticks, g_balanced_move.left_idle_updates);
+        const int16_t right = balanced_wheel_pwm(base_pwm, g_balanced_move.right_ticks,
+                                                 g_balanced_move.left_ticks, g_balanced_move.right_idle_updates);
+        drv_motor_set_speed((int16_t)(direction * left), (int16_t)((forward ? 1 : -direction) * right));
+        return;
+    }
+
     switch (g_manoeuvre_dir)
     {
         case MANOEUVRE_DIR_FWD:
@@ -718,13 +883,11 @@ static void apply_manoeuvre_drive (void)
         break;
 
         case MANOEUVRE_DIR_TURN_CW:
-            /* Cast is safe: negated value [-2650..-1650] fits in int16_t. */
-            drv_motor_set_speed(turn_pwm, (int16_t)(-turn_pwm));
-        break;
-
         case MANOEUVRE_DIR_TURN_CCW:
-            /* Cast is safe: negated value [-2650..-1650] fits in int16_t. */
-            drv_motor_set_speed((int16_t)(-turn_pwm), turn_pwm);
+        {
+            const int direction = g_manoeuvre_dir == MANOEUVRE_DIR_TURN_CW ? 1 : -1;
+            drv_motor_set_speed((int16_t)(direction * turn_pwm), (int16_t)(-direction * turn_pwm));
+        }
         break;
 
         default:
@@ -735,9 +898,8 @@ static void apply_manoeuvre_drive (void)
 
 /**
  * @brief Poll and handle emergency stop request and clear event flags.
- * @param[in,out] p_brake_timer Pointer to active brake hold counter.
  */
-static void process_emergency_events (uint32_t * const p_brake_timer)
+static void process_emergency_events (void)
 {
     UINT flgptn = 0U;
 
@@ -750,8 +912,7 @@ static void process_emergency_events (uint32_t * const p_brake_timer)
                             TMO_POL)))
     {
         flush_command_buffer();
-        g_current_state = MOTION_STATE_STOPPING;
-        *p_brake_timer  = 0U;
+        begin_active_brake();
     }
 
     /* Check for Emergency Clear Event. */
@@ -780,7 +941,7 @@ static void handle_state_idle (void)
     drv_motor_coast();
 
     /* Cast to void * required by uT-Kernel tk_rcv_mbf API signature. */
-    if ((!gb_emergency_latched) &&
+    if ((!motion_drive_inhibited()) &&
         (s_mbf_motion_cmds > 0) &&
         (tk_rcv_mbf(s_mbf_motion_cmds, (void *)&cmd, TMO_POL) > 0))
     {
@@ -793,40 +954,54 @@ static void handle_state_idle (void)
  * @param[in]     b_line_mode      True if line-following steering is active.
  * @param[in]     delta_l          Left encoder tick delta in current window.
  * @param[in]     delta_r          Right encoder tick delta in current window.
- * @param[in,out] p_line_steer_pwm Pointer to persistent steering PWM state.
+ * @param[in]     sample_us        Actual duration of that encoder window.
+ * @param[in,out] cruise Wheel feedback and steering state for this cruise.
  */
 static void handle_state_continuous (bool            b_line_mode,
                                      int8_t          delta_l,
                                      int8_t          delta_r,
-                                     int32_t * const p_line_steer_pwm)
+                                     uint32_t        sample_us,
+                                     cruise_control_t *cruise)
 {
-    motion_command_packed_t override_cmd = {0};
+    motion_command_packed_t queued_cmd = {0};
 
-    /* Step 1: Poll for in-flight stop or override commands. */
+    /* Step 1: Check for a queued motion or stop request. */
     /* Cast to void * required by uT-Kernel tk_rcv_mbf API signature. */
     if ((s_mbf_motion_cmds > 0) &&
-        (tk_rcv_mbf(s_mbf_motion_cmds, (void *)&override_cmd, TMO_POL) > 0))
+        (tk_rcv_mbf(s_mbf_motion_cmds, (void *)&queued_cmd, TMO_POL) > 0))
     {
-        parse_and_apply_command(&override_cmd);
+        *cruise = (cruise_control_t){.line_mode = b_line_mode};
+        parse_and_apply_command(&queued_cmd);
     }
     else
     {
-        /* Step 2: Compute target ticks dynamically based on commanded duty. */
-        /* Casts to int32_t prevent unsigned arithmetic promotion issues. */
-        int32_t const target_ticks =
-            (TARGET_BASE_CRUISE_TICKS * (int32_t)g_active_speed_duty) /
-            (int32_t)DEFAULT_SPEED_DUTY;
+        /* Preserve fractional encoder targets for slow line following. */
+        int32_t const scaled_ticks = TARGET_BASE_CRUISE_TICKS * (int32_t)g_active_speed_duty;
+        int32_t target_milliticks = (scaled_ticks / (int32_t)DEFAULT_SPEED_DUTY) * MILLITICKS_PER_TICK;
+        if (b_line_mode)
+        {
+            target_milliticks = (LINE_CRUISE_BASE_TICKS_PER_UPDATE *
+                                 (int32_t)g_active_speed_duty * LINE_CRUISE_SPEED_PERCENT *
+                                 (MILLITICKS_PER_TICK / 100)) / (int32_t)DEFAULT_SPEED_DUTY;
+        }
 
-        /* Step 3: Dynamic steering return handling. */
-        update_line_steering(b_line_mode, p_line_steer_pwm);
+        update_line_steering(b_line_mode, &cruise->steering_percent);
 
-        /* Step 4: Drive motors using feedforward floor + P feedback. */
-        int16_t const left_pwm  = line_drive_pwm(target_ticks,
-                                                 delta_l,
-                                                 *p_line_steer_pwm);
-        int16_t const right_pwm = line_drive_pwm(target_ticks,
-                                                 delta_r,
-                                                 -(*p_line_steer_pwm));
+        /* Bound the divisor to avoid huge rate spikes from clustered wakeups.
+         * A signed tick times 10,000 us times 1,000 still fits int32_t. */
+        const int32_t elapsed = sample_us > INT32_MAX ? INT32_MAX :
+            (sample_us < TASK_PERIOD_US / 2 ? TASK_PERIOD_US / 2 : (int32_t)sample_us);
+        const int32_t rate_scale = TASK_PERIOD_US * MILLITICKS_PER_TICK;
+        const int32_t left_forward = (int32_t)delta_l * ENCODER_LEFT_FORWARD_SIGN *
+                                      rate_scale / elapsed;
+        const int32_t right_forward = (int32_t)delta_r * ENCODER_RIGHT_FORWARD_SIGN *
+                                       rate_scale / elapsed;
+        /* The wheel loops regulate the requested turn as part of their targets. */
+        const int32_t turn_milliticks = target_milliticks * cruise->steering_percent / 100;
+        const int16_t left_pwm = line_drive_pwm(&cruise->left,
+            target_milliticks + turn_milliticks, left_forward);
+        const int16_t right_pwm = line_drive_pwm(&cruise->right,
+            target_milliticks - turn_milliticks, right_forward);
 
         drv_motor_set_speed(left_pwm, right_pwm);
     }
@@ -836,40 +1011,65 @@ static void handle_state_continuous (bool            b_line_mode,
  * @brief Execute MANOEUVRE state logic.
  * @param[in]     delta_l       Left encoder tick delta in current window.
  * @param[in]     delta_r       Right encoder tick delta in current window.
- * @param[in,out] p_brake_timer Pointer to active brake hold counter.
  */
 static void handle_state_manoeuvre (int8_t           delta_l,
-                                    int8_t           delta_r,
-                                    uint32_t * const p_brake_timer)
+                                    int8_t           delta_r)
 {
-    motion_command_packed_t override_cmd = {0};
+    motion_command_packed_t queued_cmd = {0};
 
-    /* Step 1: Poll for in-flight stop or override commands. */
+    /* Step 1: Check for a queued motion or stop request. */
     /* Cast to void * required by uT-Kernel tk_rcv_mbf API signature. */
     if ((s_mbf_motion_cmds > 0) &&
-        (tk_rcv_mbf(s_mbf_motion_cmds, (void *)&override_cmd, TMO_POL) > 0))
+        (tk_rcv_mbf(s_mbf_motion_cmds, (void *)&queued_cmd, TMO_POL) > 0))
     {
-        parse_and_apply_command(&override_cmd);
+        parse_and_apply_command(&queued_cmd);
     }
     else
     {
-        /* Step 2: Step magnitude with absolute deltas so reverse counts up. */
-        /* Casts to int32_t prevent signed 8-bit negation overflow on -128. */
-        int32_t const abs_l    = (delta_l >= 0)
-                                     ? (int32_t)delta_l
-                                     : -((int32_t)delta_l);
-        int32_t const abs_r    = (delta_r >= 0)
-                                     ? (int32_t)delta_r
-                                     : -((int32_t)delta_r);
-        int32_t const step_mag = (abs_l + abs_r) / 2;
-
-        g_manoeuvre_accumulated += step_mag;
-
-        if (g_manoeuvre_accumulated >= g_manoeuvre_target_ticks)
+        bool target_reached;
+        if (g_balanced_move.enabled)
         {
-            drv_motor_brake();
-            g_current_state = MOTION_STATE_STOPPING;
-            *p_brake_timer  = 0U;
+            const int left_direction = g_manoeuvre_dir == MANOEUVRE_DIR_TURN_CCW ? -1 : 1;
+            const int right_direction = g_manoeuvre_dir == MANOEUVRE_DIR_FWD ? 1 : -left_direction;
+            const int32_t per_wheel_target = g_manoeuvre_target_ticks / 2;
+            const int32_t left_step = (int32_t)delta_l * ENCODER_LEFT_FORWARD_SIGN * left_direction;
+            const int32_t right_step = (int32_t)delta_r * ENCODER_RIGHT_FORWARD_SIGN * right_direction;
+            g_balanced_move.left_ticks += left_step;
+            g_balanced_move.right_ticks += right_step;
+            if (g_balanced_move.short_pivot)
+            {
+                if (left_step > 0)
+                {
+                    g_balanced_move.left_idle_updates = 0U;
+                }
+                else if (g_balanced_move.left_idle_updates < PIVOT_ASSIST_WAIT_UPDATES)
+                {
+                    ++g_balanced_move.left_idle_updates;
+                }
+                if (right_step > 0)
+                {
+                    g_balanced_move.right_idle_updates = 0U;
+                }
+                else if (g_balanced_move.right_idle_updates < PIVOT_ASSIST_WAIT_UPDATES)
+                {
+                    ++g_balanced_move.right_idle_updates;
+                }
+            }
+            target_reached = g_balanced_move.left_ticks >= per_wheel_target &&
+                             g_balanced_move.right_ticks >= per_wheel_target;
+        }
+        else
+        {
+            /* Existing manoeuvres use the sum of both absolute deltas. */
+            const int32_t abs_l = delta_l >= 0 ? (int32_t)delta_l : -(int32_t)delta_l;
+            const int32_t abs_r = delta_r >= 0 ? (int32_t)delta_r : -(int32_t)delta_r;
+            g_manoeuvre_accumulated += abs_l + abs_r;
+            target_reached = g_manoeuvre_accumulated >= g_manoeuvre_target_ticks;
+        }
+
+        if (target_reached)
+        {
+            begin_active_brake();
 
             if (FLG_CONTROLLER > 0)
             {
@@ -886,14 +1086,13 @@ static void handle_state_manoeuvre (int8_t           delta_l,
 
 /**
  * @brief Execute STOPPING state logic (100 ms active dynamic brake hold).
- * @param[in,out] p_brake_timer Pointer to active brake hold counter.
  */
-static void handle_state_stopping (uint32_t * const p_brake_timer)
+static void handle_state_stopping (void)
 {
     drv_motor_brake();
-    (*p_brake_timer)++;
+    g_brake_elapsed_us = rp2040_timer_us32() - g_brake_started_us;
 
-    if (*p_brake_timer >= ACTIVE_BRAKE_TICKS)
+    if (g_brake_elapsed_us >= ACTIVE_BRAKE_US)
     {
         g_current_state = MOTION_STATE_STOPPED;
 
@@ -928,33 +1127,30 @@ static void handle_state_stopped (void)
  * @brief Populate the 4-byte bit-packed telemetry status structure.
  * @param[in] delta_l     Clamped left wheel delta ticks.
  * @param[in] delta_r     Clamped right wheel delta ticks.
- * @param[in] brake_timer Current stopping timer count.
  */
 static void update_telemetry_snapshot (int8_t   delta_l,
-                                       int8_t   delta_r,
-                                       uint32_t brake_timer)
+                                       int8_t   delta_r)
 {
     bool const b_is_braking = ((MOTION_STATE_STOPPING == g_current_state) ||
                                (MOTION_STATE_STOPPED == g_current_state));
 
     /* Casts are safe: enum values fit within 3-bit and 2-bit fields. */
-    g_latest_motion_status.state              = (uint8_t)g_current_state;
-    g_latest_motion_status.left_motor_mode    =
+    motion_status_packed_t status = {0};
+    status.state = (uint8_t)g_current_state;
+    status.left_motor_mode =
         b_is_braking
             ? (uint8_t)MOTOR_MODE_ACTIVE_BRAKE
             : (uint8_t)MOTOR_MODE_FORWARD;
-    g_latest_motion_status.right_motor_mode   =
-        g_latest_motion_status.left_motor_mode;
-    g_latest_motion_status.motor_stall_fault  =
-        (MOTION_STATE_FAULT == g_current_state) ? 1U : 0U;
-    g_latest_motion_status.left_delta_ticks   = delta_l;
-    g_latest_motion_status.right_delta_ticks  = delta_r;
-    g_latest_motion_status.encoder_fault      = 0U;
-    g_latest_motion_status.stop_timeout_fault =
-        (brake_timer > STOP_TIMEOUT_TICKS) ? 1U : 0U;
-    g_latest_motion_status.line_mode_en       =
-        gb_line_mode_authorized ? 1U : 0U;
-    g_latest_motion_status.reserved           = 0U;
+    status.right_motor_mode = status.left_motor_mode;
+    status.motor_stall_fault = (MOTION_STATE_FAULT == g_current_state) ? 1U : 0U;
+    status.left_delta_ticks = delta_l;
+    status.right_delta_ticks = delta_r;
+    status.stop_timeout_fault = (b_is_braking && g_brake_elapsed_us > STOP_TIMEOUT_US) ? 1U : 0U;
+
+    /* Copy the size-checked status without including newlib's string header. */
+    uint32_t snapshot;
+    __builtin_memcpy(&snapshot, &status, sizeof(snapshot));
+    __atomic_store_n(&g_latest_motion_status, snapshot, __ATOMIC_RELEASE);
 }
 
 /**
@@ -971,21 +1167,29 @@ static void motion_control_task (INT stacd, void * const p_exinf)
 
     int32_t  last_l         = 0;
     int32_t  last_r         = 0;
-    int32_t  line_steer_pwm = 0;
-    uint32_t brake_timer    = 0U;
+    cruise_control_t cruise = {0};
+    uint32_t previous_us = rp2040_timer_us32();
+    drv_encoder_get_snapshot(&last_l, &last_r);
 
-    for (;;)
+    while (tk_slp_tsk(TMO_FEVR) == E_OK)
     {
-        /* Cast to void ignores sleep wake return code in periodic loop. */
-        (void)tk_dly_tsk(TASK_PERIOD_MS);
+        /* One update reflects all travel since the last sample. */
+        (void)tk_can_wup(TSK_SELF);
+        const uint32_t now_us = rp2040_timer_us32();
+        const uint32_t sample_us = now_us - previous_us;
+        previous_us = now_us;
+        if (sample_us > g_max_control_gap_us)
+        {
+            g_max_control_gap_us = sample_us;
+        }
 
         int32_t curr_l = 0;
         int32_t curr_r = 0;
 
         drv_encoder_get_snapshot(&curr_l, &curr_r);
 
-        int32_t const raw_delta_l = curr_l - last_l;
-        int32_t const raw_delta_r = curr_r - last_r;
+        int32_t const raw_delta_l = (int32_t)((uint32_t)curr_l - (uint32_t)last_l);
+        int32_t const raw_delta_r = (int32_t)((uint32_t)curr_r - (uint32_t)last_r);
 
         last_l = curr_l;
         last_r = curr_r;
@@ -1003,13 +1207,23 @@ static void motion_control_task (INT stacd, void * const p_exinf)
                                           ? DELTA_TICK_MIN
                                           : (int8_t)raw_delta_r);
 
-        process_emergency_events(&brake_timer);
-
-        bool const b_line_mode = gb_line_mode_authorized;
-
-        if ((!b_line_mode) || (MOTION_STATE_CONTINUOUS != g_current_state))
+        if (drv_motor_stop_latched())
         {
-            line_steer_pwm = 0;
+            /* Discard commands that may have raced the terminal stop. */
+            flush_command_buffer();
+            g_current_state = MOTION_STATE_STOPPED;
+            update_telemetry_snapshot(delta_l, delta_r);
+            continue;
+        }
+
+        process_emergency_events();
+
+        bool const b_line_mode =
+            __atomic_load_n(&gb_line_mode_authorized, __ATOMIC_ACQUIRE);
+
+        if ((MOTION_STATE_CONTINUOUS != g_current_state) || (cruise.line_mode != b_line_mode))
+        {
+            cruise = (cruise_control_t){.line_mode = b_line_mode};
         }
 
         /* State Machine Dispatcher */
@@ -1023,15 +1237,16 @@ static void motion_control_task (INT stacd, void * const p_exinf)
                 handle_state_continuous(b_line_mode,
                                         delta_l,
                                         delta_r,
-                                        &line_steer_pwm);
+                                        sample_us,
+                                        &cruise);
             break;
 
             case MOTION_STATE_MANOEUVRE:
-                handle_state_manoeuvre(delta_l, delta_r, &brake_timer);
+                handle_state_manoeuvre(delta_l, delta_r);
             break;
 
             case MOTION_STATE_STOPPING:
-                handle_state_stopping(&brake_timer);
+                handle_state_stopping();
             break;
 
             case MOTION_STATE_STOPPED:
@@ -1044,8 +1259,11 @@ static void motion_control_task (INT stacd, void * const p_exinf)
             break;
         }
 
-        update_telemetry_snapshot(delta_l, delta_r, brake_timer);
+        update_telemetry_snapshot(delta_l, delta_r);
     }
+    motion_latch_run_stop();
+    CHECK(tk_del_cyc(g_motion_cyclic_id), "delete motion cyclic handler");
+    tk_ext_tsk();
 }
 
 /*** end of file ***/

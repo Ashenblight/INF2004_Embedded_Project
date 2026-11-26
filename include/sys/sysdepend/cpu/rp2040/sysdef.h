@@ -25,6 +25,7 @@
 
 /* CPU Core-dependent definition */
 #include "../core/armv6m/sysdef.h"
+#include "timer.h"
 
 /* ------------------------------------------------------------------------ */
 /*
@@ -282,7 +283,10 @@
 #define GPIO_OE_XOR		(SIO_BASE+0x02C)
 
 /* Timer */
-#define TIMER_BASE		0x40054000
+#define WATCHDOG_TICK		0x4005802C
+#define WATCHDOG_TICK_ENABLE	(1U << 9)
+
+#define TIMER_BASE		RP2040_TIMER_BASE
 
 #define TIMER_TIMEHW		(TIMER_BASE+0x00)
 #define TIMER_TIMELW		(TIMER_BASE+0x04)
@@ -295,8 +299,8 @@
 #define TIMER_ALARM3		(TIMER_BASE+0x1C)
 
 #define TIMER_ARMED		(TIMER_BASE+0x20)
-#define TIMER_TIMERAWH		(TIMER_BASE+0x24)
-#define TIMER_TIMERAWL		(TIMER_BASE+0x28)
+#define TIMER_TIMERAWH		RP2040_TIMER_RAW_HIGH
+#define TIMER_TIMERAWL		RP2040_TIMER_RAW_LOW
 #define TIMER_DBGPAUSE		(TIMER_BASE+0x2C)
 #define TIMER_PAUSE		(TIMER_BASE+0x30)
 
