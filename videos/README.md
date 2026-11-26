@@ -36,6 +36,11 @@ put its link in the *Log / evidence* column of that test's row in
 
 Newest at the bottom. Never delete a row.
 
-| Date | Subsystem | Test ID / demo | Commit | Student ID | Link | Notes |
-|---|---|---|---|---|---|---|
-| YYYY-MM-DD | S1 | S1-U03 | `abc1234` | | <https://youtu.be/...> | LED blinks at 2 Hz |
+| Date       | Subsystem             | Test ID / demo                                                  | Commit    | Student ID | Link                                                                                 | Notes                                     |
+| ---------- | --------------------- | --------------------------------------------------------------- | --------- | ---------- | ------------------------------------------------------------------------------------ | ----------------------------------------- |
+| YYYY-MM-DD | S1                    | S1-U03                                                          | `abc1234` |            | <https://youtu.be/...>                                                               | LED blinks at 2 Hz                        |
+| 2026-11-26 | integration subsystem | testing right turn at cross junction                            |           |            | <https://drive.google.com/file/d/1hqQV869TZ73VOC27WoFm2LwM9rFyb6K2/view?usp=sharing> | `cross-junction_right-turn_test.mp4`      |
+| 2026-11-26 | integration subsystem | testing line following right turn 1                             |           |            | <https://drive.google.com/file/d/1CgGwQCU4sWL5hDEDVDBAwW4xUfu1i8Cb/view?usp=sharing> | `line-following_right-turn_test1.mp4`     |
+| 2026-11-26 | integration subsystem | testing line following right turn 1                             |           |            | <https://drive.google.com/file/d/1IuFQX-iNrDiwu_b_5kUaIghGWPRau0oe/view?usp=sharing> | `line-following_right-turn_test2.mp4`     |
+| 2026-11-26 | integration subsystem | testing line following + right turn at cross junction in a loop |           |            | <https://drive.google.com/file/d/1doZKU5Ft2fuKEKC7J8VFB863nJzPuNKm/view?usp=sharing> | `cross-junction_right-turn_test_loop.mp4` |
+| 2026-11-26 |                       | demo try 2                                                      |           |            | <https://drive.google.com/file/d/1UjdCFTdDrz-hmAo4MeG_EYtY9lVsCrB1/view?usp=sharing> | `demo_run2.mp4`                           |
