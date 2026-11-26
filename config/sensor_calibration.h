@@ -32,6 +32,9 @@
 #define ROBOT_START_BUTTON_GPIO    (20U)
 /* 1 holds after reading the junction. 0 stops, then follows the route instruction. */
 #define ROBOT_HOLD_AT_JUNCTION     (0)
+/* Signed encoder-equivalent command for a physical 180-degree junction pivot.
+ * Start at twice the 100-degree junction right-turn command. */
+#define ROBOT_JUNCTION_UTURN_COMMAND_DEG (200)
 
 /* Robo Pico S1 servo. Calibrate with the sensor pointing straight ahead. */
 #define OBSTACLE_SERVO_GPIO           (12U)
@@ -48,7 +51,7 @@
  * Use -1 until measured. The scan uses the servo alone while this is unknown. */
 #define OBSTACLE_AXLE_TO_SERVO_MM (65)
 /* Commands verified to produce a physical 90-degree pivot on the test floor. */
-#define ROBOT_PIVOT_RIGHT_90_COMMAND_DEG (90)
+#define ROBOT_PIVOT_RIGHT_90_COMMAND_DEG (100)
 #define ROBOT_PIVOT_LEFT_90_COMMAND_DEG  (90)
 #define ROBOT_PIVOT_CALIBRATED_DUTY      (60U)
 
@@ -67,7 +70,7 @@
 /* The 100 mm hand roll measured 1180 left ticks and 1097 right ticks. */
 #define OBSTACLE_BYPASS_TICKS_PER_MM      (11)
 /* Distance from the driven axle to the front IR sensors along the chassis. */
-#define OBSTACLE_BYPASS_IR_AHEAD_MM       (60U)
+#define OBSTACLE_BYPASS_IR_AHEAD_MM       (120U)
 
 /* Nominal line-following target per 10 ms at 100% and default drive duty.
  * The 50% hump setting targets 5 ticks per 10 ms. */
@@ -77,7 +80,7 @@
 /* Percentage of the cruise target added to the outer wheel and
  * subtracted from the inner wheel during an IR correction. */
 #ifndef LINE_STEERING_CORRECTION
-#define LINE_STEERING_CORRECTION  (60)
+#define LINE_STEERING_CORRECTION  (65)
 #endif
 
 /* Code 39 distance decoder limits, measured in encoder ticks. */
@@ -127,7 +130,7 @@
 #define IMU_HUMP_WHEEL_SPACING_MM    (115U)
 #define IMU_HUMP_LATERAL_DEADBAND_MG (15U)
 /* Three passes over the 10 mm reference hump averaged 14.3 mm at 100%. */
-#define IMU_HUMP_HEIGHT_SCALE_PERCENT (65U)
+#define IMU_HUMP_HEIGHT_SCALE_PERCENT (55U)
 
 #if (LINE_LEFT_BLACK_HIGH != 0U && LINE_LEFT_BLACK_HIGH != 1U) || \
     (LINE_CENTRE_BLACK_HIGH != 0U && LINE_CENTRE_BLACK_HIGH != 1U) || \
@@ -139,6 +142,10 @@
 #endif
 #if ROBOT_HOLD_AT_JUNCTION != 0 && ROBOT_HOLD_AT_JUNCTION != 1
 #error "ROBOT_HOLD_AT_JUNCTION must be 0 or 1"
+#endif
+#if ROBOT_JUNCTION_UTURN_COMMAND_DEG == 0 || \
+    ROBOT_JUNCTION_UTURN_COMMAND_DEG < -255 || ROBOT_JUNCTION_UTURN_COMMAND_DEG > 255
+#error "The junction U-turn must be a nonzero signed command from -255 to 255"
 #endif
 #if (LINE_CRUISE_BASE_TICKS_PER_UPDATE < 1) || (63 < LINE_CRUISE_BASE_TICKS_PER_UPDATE)
 #error "Line cruise base must be from 1 to 63 ticks per update"

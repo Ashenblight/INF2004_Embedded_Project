@@ -19,19 +19,48 @@
 #define TELEMETRY_OBSTACLE_HOLD (0x8000U)
 
 static bool g_telemetry_enabled;
+static const char *gp_boot_stage = "starting";
+static int g_boot_error;
 
-static void write_u32_le(uint8_t *output, uint32_t value)
+static void write_u32_le(uint8_t *p_output, uint32_t value)
 {
     /* Each cast takes the low eight bits of the shifted word. */
-    output[0] = (uint8_t)value;
-    output[1] = (uint8_t)(value >> 8U);
-    output[2] = (uint8_t)(value >> 16U);
-    output[3] = (uint8_t)(value >> 24U);
+    p_output[0] = (uint8_t)value;
+    p_output[1] = (uint8_t)(value >> 8U);
+    p_output[2] = (uint8_t)(value >> 16U);
+    p_output[3] = (uint8_t)(value >> 24U);
+}
+
+static void write_u16_le(uint8_t *p_output, uint16_t value)
+{
+    p_output[0] = (uint8_t)value;
+    p_output[1] = (uint8_t)(value >> 8U);
 }
 
 void robot_telemetry_enable(void)
 {
+    robot_telemetry_set_boot_stage("ready");
     __atomic_store_n(&g_telemetry_enabled, true, __ATOMIC_RELEASE);
+}
+
+void robot_telemetry_set_boot_stage(const char *p_stage)
+{
+    __atomic_store_n(&gp_boot_stage, p_stage, __ATOMIC_RELEASE);
+}
+
+void robot_telemetry_set_boot_error(int error)
+{
+    __atomic_store_n(&g_boot_error, error, __ATOMIC_RELEASE);
+}
+
+const char *robot_telemetry_boot_stage(void)
+{
+    return __atomic_load_n(&gp_boot_stage, __ATOMIC_ACQUIRE);
+}
+
+int robot_telemetry_boot_error(void)
+{
+    return __atomic_load_n(&g_boot_error, __ATOMIC_ACQUIRE);
 }
 
 bool robot_telemetry_encode(uint8_t payload[ROBOT_TELEMETRY_SIZE],
@@ -64,19 +93,14 @@ bool robot_telemetry_encode(uint8_t payload[ROBOT_TELEMETRY_SIZE],
     payload[8] = (uint8_t)motion.right_delta_ticks;
     write_u32_le(&payload[9], imu_safety_get_telemetry());
     payload[13] = barcode_task_get_telemetry_letter();
-    const uint16_t peak_mm = imu_hump_peak_mm();
-    payload[14] = (uint8_t)peak_mm;
-    payload[15] = (uint8_t)(peak_mm >> 8U);
+    write_u16_le(&payload[14], imu_hump_peak_mm());
     uint16_t range = obstacle_forward_range_mm() & TELEMETRY_RANGE_MASK;
     if (vehicle_obstacle_holding())
     {
         range |= TELEMETRY_OBSTACLE_HOLD;
     }
-    payload[16] = (uint8_t)range;
-    payload[17] = (uint8_t)(range >> 8U);
-    const uint16_t scan = obstacle_scan_status_word();
-    payload[18] = (uint8_t)scan;
-    payload[19] = (uint8_t)(scan >> 8U);
+    write_u16_le(&payload[16], range);
+    write_u16_le(&payload[18], obstacle_scan_status_word());
     return true;
 }
 #endif

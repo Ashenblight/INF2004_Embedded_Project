@@ -21,4 +21,7 @@
 #define MQTT_CLIENT_ID   "mtk3smp-pico"
 #define MQTT_TOPIC       "mtk3smp-pico/heartbeat"
 
+/* Set a unique value of at least 32 hex digits for the Windows broker. */
+/* #define MQTT_PUBLISH_PASSWORD "your-hex-password" */
+
 #endif /* WIFI_SECRETS_H */

@@ -210,9 +210,13 @@ static void clearance_result(bool clear, uint32_t now_ms)
 
         case CHECK_ALONG:
             if (clear)
+            {
                 drive(DRIVE_ALONG, g_bypass.next_mm, now_ms);
+            }
             else
+            {
                 fail("parallel path blocked");
+            }
             return;
 
         case CHECK_IN:
@@ -234,9 +238,13 @@ static void clearance_result(bool clear, uint32_t now_ms)
 
         case CHECK_ROUTE:
             if (clear)
+            {
                 g_bypass.stage = BYPASS_REJOINED;
+            }
             else
+            {
                 fail("route blocked after rejoining the line");
+            }
             return;
 
         default:
@@ -263,28 +271,38 @@ static void poll_clearance(uint32_t now_ms)
     }
     const uint32_t sample = ultrasonic_sample_id();
     if (sample == g_bypass.sonar_id)
+    {
         return;
+    }
     g_bypass.sonar_id = sample;
     const uint16_t range = ultrasonic_distance_mm();
     unsigned distance = g_bypass.stage == CHECK_ALONG ? g_bypass.next_mm : g_bypass.out_mm;
     if (g_bypass.stage == CHECK_IN)
+    {
         distance += BYPASS_LINE_WINDOW_MM;
+    }
     const unsigned needed = g_bypass.stage == CHECK_ROUTE ? ULTRASONIC_STOP_DISTANCE_MM :
                                                                distance + BYPASS_STOP_RANGE_MM;
     if (g_bypass.stage == CHECK_OUT)
     {
         const char *side = g_bypass.side < 0 ? "left" : "right";
         if (range == ULTRASONIC_NO_ECHO)
+        {
             tm_printf((UB *)"[S5 BYPASS] %s side sonar no echo, needs over %u mm.\n", side, (UINT)needed);
+        }
         else
+        {
             tm_printf((UB *)"[S5 BYPASS] %s side sonar %u mm, needs over %u mm.\n",
                       side, (UINT)range, (UINT)needed);
+        }
     }
     /* A completed ping with no return is clear within the sonar's view. */
     if (range == ULTRASONIC_NO_ECHO || range > needed)
     {
         if (++g_bypass.clear_echoes == 2U)
+        {
             clearance_result(true, now_ms);
+        }
     }
     else if (++g_bypass.blocked_echoes == 2U)
     {
@@ -336,7 +354,9 @@ static void observe_line(int progress_mm)
         if (g_bypass.black_samples != 0U)
         {
             if (g_bypass.black_samples < BYPASS_LINE_CONFIRM_SAMPLES)
+            {
                 ++g_bypass.black_samples;
+            }
         }
         else if (in_window && g_bypass.white_samples >= 2U)
         {
@@ -349,9 +369,13 @@ static void observe_line(int progress_mm)
             if (g_bypass.double_black_samples < BYPASS_LINE_CONFIRM_SAMPLES)
             {
                 if (steering == LINE_STEER_CROSS_JUNCTION)
+                {
                     ++g_bypass.double_black_samples;
+                }
                 else
+                {
                     g_bypass.double_black_samples = 0U;
+                }
             }
             g_bypass.black_end_mm = (int16_t)progress_mm;
         }
@@ -359,13 +383,19 @@ static void observe_line(int progress_mm)
     else
     {
         if (g_bypass.white_samples == 0U)
+        {
             g_bypass.black_end_mm = (int16_t)progress_mm;
+        }
         if (g_bypass.white_samples < 2U)
+        {
             ++g_bypass.white_samples;
+        }
         if (g_bypass.white_samples < 2U)
         {
             if (g_bypass.double_black_samples < BYPASS_LINE_CONFIRM_SAMPLES)
+            {
                 g_bypass.double_black_samples = 0U;
+            }
             return;
         }
     }
@@ -457,9 +487,13 @@ static void finish_motion(int64_t left, int64_t right, uint32_t now_ms)
         case TURN_IN: check_clearance(CHECK_IN, now_ms); break;
         case DRIVE_IN:
             if (g_bypass.crossed_line)
+            {
                 turn_to(TURN_ROUTE, 0, now_ms);
+            }
             else
+            {
                 fail("line stripe missing in the return window");
+            }
             break;
         case TURN_ROUTE: check_clearance(CHECK_ROUTE, now_ms); break;
         default: break;
@@ -470,7 +504,9 @@ static void poll_motion(uint8_t state, uint32_t now_ms)
 {
     const uint32_t elapsed = now_ms - g_bypass.stage_ms;
     if (state == MOTION_STATE_MANOEUVRE || state == MOTION_STATE_STOPPING)
+    {
         g_bypass.saw_motion = true;
+    }
     if (elapsed >= BYPASS_MOVE_TIMEOUT_MS || (!g_bypass.saw_motion && elapsed >= BYPASS_START_TIMEOUT_MS))
     {
         fail(g_bypass.stage == TURN_ROUTE ? "forward turn timed out" :
@@ -483,7 +519,9 @@ static void poll_motion(uint8_t state, uint32_t now_ms)
     const int64_t dl = (int64_t)(int32_t)((uint32_t)left - (uint32_t)g_bypass.left_start) * ENCODER_LEFT_FORWARD_SIGN;
     const int64_t dr = (int64_t)(int32_t)((uint32_t)right - (uint32_t)g_bypass.right_start) * ENCODER_RIGHT_FORWARD_SIGN;
     if (g_bypass.stage >= DRIVE_OUT && !drive_clear(now_ms))
+    {
         return;
+    }
     if (g_bypass.stage == DRIVE_IN && g_bypass.saw_motion)
     {
         const int progress_mm = (int)((dl + dr) / (2 * OBSTACLE_BYPASS_TICKS_PER_MM));
@@ -498,7 +536,9 @@ static void poll_motion(uint8_t state, uint32_t now_ms)
     }
 
     if (state != MOTION_STATE_STOPPED || !g_bypass.saw_motion)
+    {
         return;
+    }
     if (!g_bypass.tracking_still || left != g_bypass.last_left || right != g_bypass.last_right)
     {
         g_bypass.tracking_still = true;
@@ -515,9 +555,13 @@ static void poll_motion(uint8_t state, uint32_t now_ms)
 obstacle_bypass_result_t obstacle_bypass_poll(uint32_t now_ms)
 {
     if (g_bypass.stage == BYPASS_REJOINED)
+    {
         return OBSTACLE_BYPASS_REJOINED;
+    }
     if (g_bypass.stage == BYPASS_FAILED || motion_run_stop_latched())
+    {
         return OBSTACLE_BYPASS_FAILED;
+    }
 
     motion_status_packed_t motion;
     motion_get_status(&motion);
@@ -529,15 +573,21 @@ obstacle_bypass_result_t obstacle_bypass_poll(uint32_t now_ms)
     else if (g_bypass.stage >= CHECK_OUT && g_bypass.stage <= CHECK_ROUTE)
     {
         if (motion.state != MOTION_STATE_STOPPED)
+        {
             fail("wheels moved during clearance check");
+        }
         else
+        {
             poll_clearance(now_ms);
+        }
     }
     else
     {
         poll_motion(motion.state, now_ms);
     }
     if (g_bypass.stage == BYPASS_REJOINED)
+    {
         return OBSTACLE_BYPASS_REJOINED;
+    }
     return g_bypass.stage == BYPASS_FAILED ? OBSTACLE_BYPASS_FAILED : OBSTACLE_BYPASS_ACTIVE;
 }

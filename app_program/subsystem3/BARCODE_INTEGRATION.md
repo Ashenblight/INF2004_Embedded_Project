@@ -2,11 +2,11 @@
 
 ## Current hardware build
 
-The GP28 scanner on Grove 7 starts at subsystem startup. It samples the module's `DO` signal every 250 µs and decodes a complete Code 39 frame once the final black stripe ends. Set the scan period in `config/sensor_calibration.h`. The scanner prints a serial `[S3 BARCODE SCAN]` line and publishes the latest decoded letter to bench telemetry. A parked car can scan if the paper passes the sensor.
+The scanner on Grove 7 starts at subsystem startup. The current build samples the module's `DO` signal on GP4 every 100 µs and decodes a complete Code 39 frame once the final black stripe ends. Set the scan period in `config/sensor_calibration.h`. The scanner prints a serial `[S3 BARCODE SCAN]` line and publishes the latest decoded letter to bench telemetry. A parked car can scan if the paper passes the sensor.
 
-Buddy 3's reference uses a pull-up on the digital input and classifies the three widest runs per symbol. GP28 uses that input bias. When scored matching rejects a complete frame, the firmware can use exact ranked-width patterns if all three symbols and both inter-character gaps check out. That path prints `method=ranked_widths`.
+Buddy 3's reference uses a pull-up on the digital input and classifies the three widest runs per symbol. The GP4 input uses that bias. When scored matching rejects a complete frame, the firmware can use exact ranked-width patterns if all three symbols and both inter-character gaps check out. That path prints `method=ranked_widths`.
 
-GP20 starts and stops line following. For navigation, the controller records the start of the current approach. At a junction it consumes at most one fresh scan whose first bar was captured during that approach. The controller uses the route's map revision to choose the maneuver. The A/F/Z bench profile reports the chosen action and stays stopped at a junction.
+GP20 starts and stops line following. For navigation, the controller records the start of the current approach. At a junction it consumes at most one fresh scan whose first bar was captured during that approach. The controller chooses the maneuver from the map copied at GP20 start. The A/F/Z bench profile reports the chosen action. `ROBOT_HOLD_AT_JUNCTION` controls whether the bench car stays stopped.
 
 During a moving test, a manual GP20 stop prints the digital trace. An unknown result at a junction also prints it. This covers high and low sample counts, black and white runs, and their widths in microseconds. Resetting the diagnostic trace leaves the always-on decoder running.
 
@@ -23,9 +23,11 @@ accepts three entries in five bytes for the current no-U-turn mission. That
 three-entry extension requires the PC sender to emit five bytes, as the branch's
 existing encoder still emits six.
 
-The existing network-owner task subscribes to the mapping topic, reassembles
-binary fragments, and invokes `barcode_mapping_apply_mqtt()`. Subsystem 3
-registers this handler during init. An early map is retained until registration; a busy mapping mutex is retried on the network-owner heartbeat. Incomplete/oversized packets, duplicate
+In `COURSE_RUN=1`, the network task subscribes to the mapping topic, reassembles
+binary fragments, and calls `barcode_mapping_apply_mqtt()`. Subsystem 3
+registers this handler during init. The network task retains an early map until
+registration and retries a busy mapping mutex on its next poll. GP20 freezes
+the map during the run. Incomplete or oversized packets, duplicate
 letters, invalid actions and stale/conflicting revisions are rejected. Internally,
 wire revisions 0..255 become 1..256 to preserve nonzero navigation revisions.
 Four-entry messages follow Buddy 1's validation, including allowing two letters
@@ -33,10 +35,9 @@ to share an action. The older eight-byte `barcode_mapping_apply_wire()` proposal
 remains available for existing callers and retains its stricter contract.
 
 
+## Earlier integration design
 
-Target: `C:\Users\aloys\Downloads\SIT\y2s1\INF2004 embedded\carProj\INF2004_ProjectTemplate\app_program\subsystem3`.
-
-S3 code is implemented. For the short five-connection checklist, see [BARCODE_CONNECTIONS.md](BARCODE_CONNECTIONS.md). Production `barcode_port.c` contains no host-simulation branch and needs no uncommenting. This is not an end-to-end tested car: linking Buddy 2 Motion Control, the MQTT receiver call, Vehicle Controller event binding and junction/motor behaviour still require team integration. Normal firmware starts barcode scanning **disabled**. A missing encoder implementation returns `E_NOEXS`; it never substitutes simulated counts. Line following now reports two-black as CROSS_JUNCTION and emits a separate navigation event; see CROSS_JUNCTION_GUIDE.md.
+The sections below record the earlier distance-based integration.
 
 ## The flow, simply
 

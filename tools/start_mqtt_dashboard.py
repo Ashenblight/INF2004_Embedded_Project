@@ -3,6 +3,7 @@
 import importlib.util
 import ipaddress
 import os
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -16,6 +17,10 @@ from contextlib import ExitStack
 PROJECT = Path(__file__).resolve().parents[1]
 SETTINGS = PROJECT / "mqtt.env"
 DASHBOARD_HOST = "127.0.0.1"
+WIFI_SETTINGS = PROJECT / "config" / "wifi_secrets.h"
+PUBLISH_USER = "se05-robot"
+ROUTE_USER = "se05-course"
+ROUTE_TOPIC = "mtk3smp-pico/cmd/test"
 
 
 def read_settings():
@@ -49,6 +54,77 @@ def find_mosquitto(configured_path):
     if installed or default_path.is_file():
         return installed or str(default_path)
     raise RuntimeError("Install Mosquitto for Windows or set MOSQUITTO_EXE in mqtt.env.")
+
+
+def validate_password(value, name):
+    if not re.fullmatch(r"[0-9a-fA-F]{32,128}", value):
+        raise ValueError(f"Set {name} to a unique value of 32 to 128 hex digits.")
+
+
+def read_firmware_setting(name):
+    if WIFI_SETTINGS.is_file():
+        match = re.search(
+            rf'^\s*#define[ \t]+{name}[ \t]+"([^"\r\n]*)"',
+            WIFI_SETTINGS.read_text(encoding="utf-8-sig"),
+            re.MULTILINE,
+        )
+        if match:
+            return match.group(1)
+    return ""
+
+
+def create_broker_config(directory, mosquitto, host, port, robot_id,
+                         heartbeat_topic, publish_password, route_password):
+    # Literal topic names cannot introduce additional ACL lines or wildcards.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", robot_id):
+        raise ValueError("Use letters, digits, dashes or underscores in MQTT_CLIENT_ID.")
+    if not re.fullmatch(r"[A-Za-z0-9_/-]+", heartbeat_topic):
+        raise ValueError("Set MQTT_TOPIC to a literal heartbeat topic.")
+    bench = f"{robot_id}/telemetry/bench"
+    if heartbeat_topic in (bench, f"{robot_id}/telemetry", ROUTE_TOPIC):
+        raise ValueError("MQTT_TOPIC must be distinct from the other project topics.")
+
+    validate_password(publish_password, "MQTT_PUBLISH_PASSWORD in config/wifi_secrets.h")
+    accounts = [f"{PUBLISH_USER}:{publish_password}"]
+    rules = [
+        f"topic read {heartbeat_topic}",
+        f"topic read {robot_id}/telemetry",
+        f"topic read {bench}",
+        f"user {PUBLISH_USER}",
+        f"topic write {heartbeat_topic}",
+        f"topic write {bench}",
+        f"topic read {ROUTE_TOPIC}",
+    ]
+    if route_password:
+        validate_password(route_password, "MQTT_ROUTE_PASSWORD in mqtt.env")
+        if route_password == publish_password:
+            raise ValueError("The publishing and course accounts need distinct passwords.")
+        accounts.append(f"{ROUTE_USER}:{route_password}")
+        rules.extend((f"user {ROUTE_USER}", f"topic write {ROUTE_TOPIC}"))
+
+    password_file = directory / "broker.passwd"
+    acl_file = directory / "broker.acl"
+    config_file = directory / "mosquitto.conf"
+    passwd_tool = Path(mosquitto).with_name("mosquitto_passwd.exe")
+    if not passwd_tool.is_file():
+        raise RuntimeError("Install mosquitto_passwd.exe alongside mosquitto.exe.")
+
+    # Hash the temporary password file in place. The utility receives only
+    # its path, keeping both passwords out of the process command line.
+    password_file.write_text("\n".join(accounts) + "\n", encoding="ascii")
+    try:
+        subprocess.run([str(passwd_tool), "-U", str(password_file)], check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        password_file.unlink(missing_ok=True)
+        raise RuntimeError("Mosquitto could not prepare its password file.") from error
+    acl_file.write_text("\n".join(rules) + "\n", encoding="ascii")
+    config_file.write_text(
+        f"set_tcp_nodelay true\nlistener {port} {host}\n"
+        f"allow_anonymous true\npassword_file {password_file.as_posix()}\n"
+        f"acl_file {acl_file.as_posix()}\n",
+        encoding="utf-8",
+    )
+    return config_file
 
 
 def port_is_listening(host, port):
@@ -95,6 +171,9 @@ def main():
     dashboard_port = read_port(settings, "DASHBOARD_PORT", "8501")
     robot_id = settings.get("MQTT_CLIENT_ID") or "mtk3smp-pico"
     mosquitto = find_mosquitto(settings.get("MOSQUITTO_EXE"))
+    heartbeat_topic = read_firmware_setting("MQTT_TOPIC") or f"{robot_id}/heartbeat"
+    publish_password = read_firmware_setting("MQTT_PUBLISH_PASSWORD")
+    route_password = settings.get("MQTT_ROUTE_PASSWORD", "")
 
     if any(importlib.util.find_spec(module) is None for module in ("streamlit", "paho")):
         raise RuntimeError('Install dashboard dependencies with python -m pip install "streamlit>=1.50,<2" "paho-mqtt>=2,<3"')
@@ -106,8 +185,10 @@ def main():
         raise ValueError("Choose different ports for MQTT and the dashboard on localhost.")
 
     with tempfile.TemporaryDirectory(prefix="se05-mqtt-") as directory, ExitStack() as children:
-        broker_config = Path(directory) / "mosquitto.conf"
-        broker_config.write_text(f"listener {broker_port} {broker_host}\nallow_anonymous true\n", encoding="ascii")
+        broker_config = create_broker_config(
+            Path(directory), mosquitto, broker_host, broker_port, robot_id,
+            heartbeat_topic, publish_password, route_password,
+        )
         # Keep both child processes attached to the launcher console.
         broker = subprocess.Popen([mosquitto, "-c", str(broker_config)], cwd=PROJECT)
         children.callback(stop_process, broker)
@@ -116,8 +197,10 @@ def main():
         dashboard = subprocess.Popen([
             sys.executable, "-B", "-m", "streamlit", "run", "tools/buddy1_dashboard.py",
             "--server.address", DASHBOARD_HOST, "--server.port", str(dashboard_port),
+            "--server.runOnSave", "true",
             "--server.headless", "false", "--browser.gatherUsageStats", "false", "--",
             "--broker", broker_host, "--port", str(broker_port), f"--robot-id={robot_id}",
+            f"--heartbeat-topic={heartbeat_topic}",
         ], cwd=PROJECT)
         children.callback(stop_process, dashboard)
         print(f"Dashboard URL: http://{DASHBOARD_HOST}:{dashboard_port}. Press Ctrl+C to stop both processes.", flush=True)

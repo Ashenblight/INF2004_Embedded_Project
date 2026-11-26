@@ -963,15 +963,15 @@ static void handle_state_continuous (bool            b_line_mode,
                                      uint32_t        sample_us,
                                      cruise_control_t *cruise)
 {
-    motion_command_packed_t override_cmd = {0};
+    motion_command_packed_t queued_cmd = {0};
 
-    /* Step 1: Poll for in-flight stop or override commands. */
+    /* Step 1: Check for a queued motion or stop request. */
     /* Cast to void * required by uT-Kernel tk_rcv_mbf API signature. */
     if ((s_mbf_motion_cmds > 0) &&
-        (tk_rcv_mbf(s_mbf_motion_cmds, (void *)&override_cmd, TMO_POL) > 0))
+        (tk_rcv_mbf(s_mbf_motion_cmds, (void *)&queued_cmd, TMO_POL) > 0))
     {
         *cruise = (cruise_control_t){.line_mode = b_line_mode};
-        parse_and_apply_command(&override_cmd);
+        parse_and_apply_command(&queued_cmd);
     }
     else
     {
@@ -1015,14 +1015,14 @@ static void handle_state_continuous (bool            b_line_mode,
 static void handle_state_manoeuvre (int8_t           delta_l,
                                     int8_t           delta_r)
 {
-    motion_command_packed_t override_cmd = {0};
+    motion_command_packed_t queued_cmd = {0};
 
-    /* Step 1: Poll for in-flight stop or override commands. */
+    /* Step 1: Check for a queued motion or stop request. */
     /* Cast to void * required by uT-Kernel tk_rcv_mbf API signature. */
     if ((s_mbf_motion_cmds > 0) &&
-        (tk_rcv_mbf(s_mbf_motion_cmds, (void *)&override_cmd, TMO_POL) > 0))
+        (tk_rcv_mbf(s_mbf_motion_cmds, (void *)&queued_cmd, TMO_POL) > 0))
     {
-        parse_and_apply_command(&override_cmd);
+        parse_and_apply_command(&queued_cmd);
     }
     else
     {
@@ -1039,13 +1039,21 @@ static void handle_state_manoeuvre (int8_t           delta_l,
             if (g_balanced_move.short_pivot)
             {
                 if (left_step > 0)
+                {
                     g_balanced_move.left_idle_updates = 0U;
+                }
                 else if (g_balanced_move.left_idle_updates < PIVOT_ASSIST_WAIT_UPDATES)
+                {
                     ++g_balanced_move.left_idle_updates;
+                }
                 if (right_step > 0)
+                {
                     g_balanced_move.right_idle_updates = 0U;
+                }
                 else if (g_balanced_move.right_idle_updates < PIVOT_ASSIST_WAIT_UPDATES)
+                {
                     ++g_balanced_move.right_idle_updates;
+                }
             }
             target_reached = g_balanced_move.left_ticks >= per_wheel_target &&
                              g_balanced_move.right_ticks >= per_wheel_target;

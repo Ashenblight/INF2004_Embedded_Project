@@ -1,0 +1,27 @@
+SE-05 host regression suite
+Run: 2026-11-26 (Asia/Singapore)
+Source: working tree based on d36dee1
+Command: python -B testing/host/run.py
+
+PASS junction geometry (travel, wrap, signed turn targets)
+PASS hump sampling (motion gate, same-side confirmation, peak)
+PASS lift detection (reference, repeated cues, immediate inversion)
+PASS course map (validation, revision, retry, run freeze)
+PASS firmware telemetry (boot gate, exact wire frame, unavailable)
+test_course_account_cannot_publish_telemetry (test_broker.BrokerPermissionTests.test_course_account_cannot_publish_telemetry) ... ok
+test_guest_can_read_but_only_robot_can_publish_telemetry (test_broker.BrokerPermissionTests.test_guest_can_read_but_only_robot_can_publish_telemetry) ... ok
+test_incorrect_publisher_password_is_rejected (test_broker.BrokerPermissionTests.test_incorrect_publisher_password_is_rejected) ... ok
+test_bad_packet_keeps_last_valid_snapshot (test_telemetry.DashboardFeedTests.test_bad_packet_keeps_last_valid_snapshot) ... ok
+test_ignores_unrelated_and_retained_samples (test_telemetry.DashboardFeedTests.test_ignores_unrelated_and_retained_samples) ... ok
+test_live_heartbeat_explains_application_startup_failure (test_telemetry.DashboardFeedTests.test_live_heartbeat_explains_application_startup_failure) ... ok
+test_uptime_reset_clears_chart (test_telemetry.DashboardFeedTests.test_uptime_reset_clears_chart) ... ok
+test_invalid_wire_frames (test_telemetry.TelemetryTests.test_invalid_wire_frames) ... ok
+test_unavailable_sensor_fields (test_telemetry.TelemetryTests.test_unavailable_sensor_fields) ... ok
+test_wire_versions (test_telemetry.TelemetryTests.test_wire_versions) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 1.609s
+
+OK
+
+The suite uses local host inputs. No on-target or track run was performed.

@@ -227,6 +227,7 @@ CFLAGS  += -DCNF_SMP=1
 ASFLAGS += -DCNF_SMP=1
 endif
 CFLAGS  += -DAPP_TEST=$(TEST)
+CFLAGS  += -DAPP_COURSE_RUN=$(COURSE_RUN)
 CFLAGS  += -DAPP_SERVO_TEST=$(SERVO_TEST)
 CFLAGS  += -DAPP_TURN_TEST=$(TURN_TEST)
 CFLAGS  += -DAPP_BARCODE_CAPTURE=$(BARCODE_CAPTURE)
@@ -262,7 +263,7 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)-barcode$(BARCODE_CAPTURE)-servo$(SERVO_TEST)-turn$(TURN_TEST)
+PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)-barcode$(BARCODE_CAPTURE)-servo$(SERVO_TEST)-turn$(TURN_TEST)-course$(COURSE_RUN)
 PROFILE_FILE := .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))

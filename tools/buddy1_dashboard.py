@@ -5,6 +5,7 @@ from collections import deque
 from datetime import datetime
 from html import escape
 from pathlib import Path
+from re import fullmatch
 from threading import Lock
 from time import monotonic
 
@@ -319,8 +320,14 @@ def show_link_message(data, heartbeat, bench):
         tone, title = "warning", "Bench telemetry has stopped"
         detail = "The sensor values below are from the last packet. Check the Pico’s Wi-Fi and serial MQTT messages."
     elif heartbeat == "Live":
-        tone, title = "warning", "The Pico is sending heartbeats"
-        detail = "No bench frames have arrived. Check the startup log and flash the current MQTT UF2 for live sensor data."
+        failed = fullmatch(r"hb [0-9]+ boot=([a-z_]+) err=(-[0-9]+)", data["last_heartbeat"] or "")
+        if failed:
+            tone, title = "warning", "Controller startup failed"
+            step, error = failed.groups()
+            detail = f"The Pico is connected to MQTT. Startup stopped at {step.replace('_', ' ')} (error {error}). Check the USB startup log."
+        else:
+            tone, title = "warning", "The Pico is sending heartbeats"
+            detail = "No bench frames have arrived. Check the startup log and flash the current MQTT UF2 for live sensor data."
     else:
         tone, title = "warning", "The broker is ready. Waiting for the Pico."
         detail = ("In the USB serial monitor, look for <code>wifi: link up</code> and "

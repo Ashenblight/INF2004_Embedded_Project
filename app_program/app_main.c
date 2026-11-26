@@ -19,6 +19,12 @@
 
 static ER start_application(void);
 
+#if TM_MQTT && !APP_TEST
+#define REPORT_BOOT_STAGE(stage) robot_telemetry_set_boot_stage(stage)
+#else
+#define REPORT_BOOT_STAGE(stage) ((void)0)
+#endif
+
 static ID app_create_task(FP entry, PRI pri, UW prc, const char *name)
 {
     T_CTSK ctsk = {0};
@@ -98,6 +104,7 @@ EXPORT ID app_start_periodic_task(FP entry, PRI pri, UW prc, const char *name,
 
 static ER start_application(void)
 {
+    REPORT_BOOT_STAGE("motion_init");
     ER er = subsystem2_init();
     if (er < E_OK)
     {
@@ -107,11 +114,13 @@ static ER start_application(void)
     tm_printf((UB *)"[ENC] GPIO IRQ ready on core 0.\n");
 
 #if APP_SERVO_TEST
+    REPORT_BOOT_STAGE("servo_test");
     motion_latch_run_stop();
     er = obstacle_servo_test();
     CHECK(er, "obstacle_servo_test");
     return er;
 #elif APP_TURN_TEST
+    REPORT_BOOT_STAGE("turn_test");
     er = imu_safety_init();
     if (er == E_OK)
     {
@@ -128,6 +137,7 @@ static ER start_application(void)
     CHECK(er, "point-turn test");
     return er;
 #else
+    REPORT_BOOT_STAGE("line_barcode_init");
     er = subsystem3_init();
     if (er < E_OK)
     {
@@ -136,6 +146,7 @@ static ER start_application(void)
     }
 
 #if !APP_TEST
+    REPORT_BOOT_STAGE("imu_init");
     er = imu_safety_init();
     if (er < E_OK)
     {
@@ -144,6 +155,7 @@ static ER start_application(void)
     }
 #endif
 
+    REPORT_BOOT_STAGE("obstacle_init");
     er = subsystem5_init();
     if (er < E_OK)
     {
@@ -155,10 +167,12 @@ static ER start_application(void)
     /* Run the S2 register and logic checks before starting Motion Control. */
     tm_printf((UB *)"[TEST] === test run start ===\n");
     subsystem2_test();
+    subsystem5_test();
     tk_dly_tsk(1000);
     tm_printf((UB *)"[TEST] === test run end ===\n\n");
 #endif
 
+    REPORT_BOOT_STAGE("motion_start");
     er = subsystem2_start();
     if (er < E_OK)
     {
@@ -169,6 +183,7 @@ static ER start_application(void)
 #if APP_TEST
     subsystem2_run_live_demo();
 #else
+    REPORT_BOOT_STAGE("imu_start");
     er = imu_safety_start();
     if (er < E_OK)
     {
@@ -177,6 +192,7 @@ static ER start_application(void)
     }
 #endif
 
+    REPORT_BOOT_STAGE("line_barcode_start");
     er = subsystem3_start();
     if (er < E_OK)
     {
@@ -185,6 +201,7 @@ static ER start_application(void)
     }
 
     /* Start the GP20 controller only after its dependencies are ready. */
+    REPORT_BOOT_STAGE("controller_start");
     er = subsystem5_start();
     CHECK(er, "subsystem5_start");
 #if TM_MQTT && !APP_TEST
@@ -216,8 +233,12 @@ EXPORT INT usermain(void)
 	tm_printf((UB *)"single-core build\n");
 #endif
 
-    if (start_application() < E_OK)
+    const ER startup_result = start_application();
+    if (startup_result < E_OK)
     {
+#if TM_MQTT && !APP_TEST
+        robot_telemetry_set_boot_error(startup_result);
+#endif
         tm_printf((UB *)"[BOOT] Startup failed. GP20 control is disabled.\n");
         for (;;)
         {

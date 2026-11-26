@@ -30,6 +30,10 @@ ER barcode_mapping_apply_wire(const uint8_t *payload, unsigned length);
  * internally as 1..256. Call once per complete, topic-checked payload.
  * Returns 0 on acceptance, 1 for a temporary busy mutex, or a negative error. */
 int barcode_mapping_apply_mqtt(const unsigned char *payload, unsigned length);
+#if APP_COURSE_RUN
+/* Freeze changes before the controller copies its active run map. */
+void barcode_mapping_freeze(bool frozen);
+#endif
 ER barcode_mapping_copy(barcode_mapping_entry_t entries[4], uint16_t *revision);
 ER barcode_shared_status(barcode_control_status_t *status);
 ER barcode_shared_set_enabled(bool enabled);

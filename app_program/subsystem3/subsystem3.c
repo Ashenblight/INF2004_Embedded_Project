@@ -11,7 +11,7 @@
 #ifndef APP_BARCODE_CAPTURE
 #define APP_BARCODE_CAPTURE 1
 #endif
-#if TM_MQTT
+#if APP_COURSE_RUN
 #include "../../lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.h"
 #endif
 
@@ -29,7 +29,8 @@ EXPORT ER subsystem3_init(void)
 	   is why subsystem 2 takes it from its memory pool. */
 	cmbx.mbxatr = TA_TFIFO | TA_MFIFO;	/* FIFO waiters, FIFO messages */
 	mbx_samples = tk_cre_mbx(&cmbx);
-	if (mbx_samples < E_OK) {
+	if (mbx_samples < E_OK)
+	{
 		return mbx_samples;
 	}
 
@@ -38,16 +39,21 @@ EXPORT ER subsystem3_init(void)
 	   holder is temporarily raised to the waiter's priority. */
 	cmtx.mtxatr = TA_INHERIT;
 	mtx_stats = tk_cre_mtx(&cmtx);
-	if (mtx_stats < E_OK) {
+	if (mtx_stats < E_OK)
+	{
 		return mtx_stats;
 	}
 	ER line_result = line_task_init();
 	if (line_result < E_OK)
+	{
 		return line_result;
+	}
 	ER barcode_result = barcode_task_init();
-#if TM_MQTT
+#if APP_COURSE_RUN
 	if (barcode_result == E_OK)
+	{
 		mqtt_utk_set_mapping_handler(barcode_mapping_apply_mqtt);
+	}
 #endif
 	return barcode_result;
 }
@@ -62,7 +68,9 @@ EXPORT ER subsystem3_start(void)
 	return (result < E_OK) ? result : barcode_task_start();
 #else
 	if (result == E_OK)
+	{
 		tm_printf((UB *)"[S3] Barcode capture paused for timing test.\n");
+	}
 	return result;
 #endif
 }
@@ -78,10 +86,12 @@ EXPORT void consumer_task(INT stacd, void *exinf)
 
 	(void)stacd; (void)exinf;
 
-	while (1) {
+	while (1)
+	{
 		/* 1. Wait for the next sample (TMO_FEVR = wait forever) */
 		er = tk_rcv_mbx(mbx_samples, (T_MSG **)&msg, TMO_FEVR);
-		if (er < E_OK) {
+		if (er < E_OK)
+		{
 			CHECK(er, "tk_rcv_mbx");
 			continue;
 		}
@@ -89,10 +99,12 @@ EXPORT void consumer_task(INT stacd, void *exinf)
 		/* 2. Update the shared statistics.  Subsystem 4 reads them
 		      too, so lock the mutex around every access (IF-04). */
 		tk_loc_mtx(mtx_stats, TMO_FEVR);
-		if (app_stats.received == 0 || msg->value < app_stats.min) {
+		if (app_stats.received == 0 || msg->value < app_stats.min)
+		{
 			app_stats.min = msg->value;
 		}
-		if (app_stats.received == 0 || msg->value > app_stats.max) {
+		if (app_stats.received == 0 || msg->value > app_stats.max)
+		{
 			app_stats.max = msg->value;
 		}
 		app_stats.sum += msg->value;
@@ -102,7 +114,8 @@ EXPORT void consumer_task(INT stacd, void *exinf)
 		/* 3. Every S3_BATCH_SIZE samples, send a text line to subsystem
 		      4 through its message buffer (the text is copied), then
 		      set FLG_BATCH to wake it up (IF-03). */
-		if (count % S3_BATCH_SIZE == 0) {
+		if (count % S3_BATCH_SIZE == 0)
+		{
 			/* tm_sprintf: like sprintf, returns the length.
 			   The longest line here is ~35 bytes < S4_SUMMARY_MAX. */
 			len = tm_sprintf(text, (const UB*)"n=%u last=%d from core %d",
@@ -111,7 +124,8 @@ EXPORT void consumer_task(INT stacd, void *exinf)
 			/* TMO_POL: if the buffer is full, drop the line rather
 			   than block the data path. */
 			er = tk_snd_mbf(mbf_summary, text, len, TMO_POL);
-			if (er == E_OK) {
+			if (er == E_OK)
+			{
 				tk_set_flg(flg_events, FLG_BATCH);
 			}
 		}

@@ -7,11 +7,12 @@ The Pico W sends a compact snapshot about ten times per second while MQTT is con
 1. Install [Mosquitto for Windows](https://mosquitto.org/download/) and the dashboard dependencies once. Run `python -m pip install "streamlit>=1.50,<2" "paho-mqtt>=2,<3"` in PowerShell.
 2. Double-click **Start MQTT Dashboard.cmd** in the project folder. On the first click it creates the ignored `mqtt.env` file from `mqtt.env.example` and opens it in Notepad.
 3. Run `ipconfig` in PowerShell. Set `MQTT_BROKER_IP` in `mqtt.env` to the active Wi-Fi adapter's IPv4 address. Keep the broker address, port, and client ID aligned with `config/wifi_secrets.h`. Update both files and rebuild the Pico firmware if the broker address or port changes. Set `MOSQUITTO_EXE` in `mqtt.env` if you installed Mosquitto outside its default folder and it is missing from PATH.
-4. Save the file and double-click **Start MQTT Dashboard.cmd** again. It starts the broker, waits for it to listen, and opens the dashboard at [http://127.0.0.1:8501](http://127.0.0.1:8501) by default. Use a private Wi-Fi network for this development broker. If Windows Firewall prompts, allow private-network access. Confirm **Bench telemetry** shows **Live**. Press **Ctrl+C** in the launcher console to stop both processes.
+4. Set `MQTT_PUBLISH_PASSWORD` in the ignored `config/wifi_secrets.h` to a unique value of 32 to 128 hex digits and rebuild the firmware. The launcher reads the same setting. For course setup, give `MQTT_ROUTE_PASSWORD` in the ignored `mqtt.env` a different unique value of 32 to 128 hex digits.
+5. Save the file and double-click **Start MQTT Dashboard.cmd** again. It starts the broker, waits for it to listen, and opens the dashboard at [http://127.0.0.1:8501](http://127.0.0.1:8501) by default. Use a private Wi-Fi network for this development broker. If Windows Firewall prompts, allow private-network access. Confirm **Bench telemetry** shows **Live**. Press **Ctrl+C** in the launcher console to stop both processes.
 
 ## Configure and build
 
-Use a broker reachable from the Pico W over the demo Wi-Fi network. In the ignored `config/wifi_secrets.h`, set `WIFI_SSID`, `WIFI_PASSWORD`, `MQTT_BROKER_IP` and `MQTT_BROKER_PORT`. If the file is absent, copy `config/wifi_secrets.example.h` first. Use the broker's reachable LAN IPv4 address. A broker running on a PC must listen on a network interface the Pico can reach. The current firmware connects without MQTT username, password or TLS.
+Use a broker reachable from the Pico W over the demo Wi-Fi network. In the ignored `config/wifi_secrets.h`, set `WIFI_SSID`, `WIFI_PASSWORD`, `MQTT_BROKER_IP` and `MQTT_BROKER_PORT`. If the file is absent, copy `config/wifi_secrets.example.h` first. Use the broker's reachable LAN IPv4 address. A broker running on a PC must listen on a network interface the Pico can reach. The Windows launcher gives the `se05-robot` account exclusive write access to the heartbeat and bench topics. The dashboard subscribes with read-only guest access. The optional `se05-course` account writes only to the course map topic. For a separately managed broker, configure the same topic permissions. MQTT TCP on this setup uses a private Wi-Fi network and does not use TLS.
 
 From the project root in WSL:
 
@@ -32,18 +33,19 @@ Build the course image from WSL in `build_make`.
 make -j8 NET=lwip MQTT=1 COURSE_RUN=1
 ```
 
-Flash `mtk3pico_smp1_usb_cdc_wifi_lwip_mqtt_course.uf2`. The course controller waits for an MQTT barcode map before GP20 starts motion and continues after stopping to read a junction. The ordinary MQTT image uses the local bench map and the junction hold setting from `config/sensor_calibration.h`.
+Flash `mtk3pico_smp1_usb_cdc_wifi_lwip_mqtt_course.uf2`. The course controller waits for an MQTT barcode map before GP20 starts motion and continues after stopping to read a junction. The ordinary MQTT image publishes telemetry and uses the local bench map and junction hold setting from `config/sensor_calibration.h`. The course image accepts configuration for the next run while parked. GP20 fixes the map for the run.
 
-Publish the team's confirmed map to `mtk3smp-pico/cmd/test` after the Pico connects. The packet begins with hex `17` and a one-byte revision, followed by three or four entries. Each entry is `(letter_index << 3) | action`, with A=0 through Z=25 and actions left=1, right=2, straight=3, U-turn=4. This WSL example sends the bench A/F/Z map. Use the entries for the actual course during the demo.
+Publish the team's confirmed map to `mtk3smp-pico/cmd/test` after the Pico connects. The packet begins with hex `17` and a one-byte revision, followed by three or four entries. Each entry is `(letter_index << 3) | action`, with A=0 through Z=25 and actions left=1, right=2, straight=3, U-turn=4. This WSL example sends the bench A/F/Z map. Set the shell variable `MQTT_ROUTE_PASSWORD` from your local `mqtt.env` first. Use the entries for the actual course during the demo.
 
 ```sh
 python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex("17 00 01 2a cb"))' \
-  | mosquitto_pub -h BROKER_IP -p 1883 -q 1 -t mtk3smp-pico/cmd/test -s
+  | mosquitto_pub -h BROKER_IP -p 1883 -q 1 -u se05-course \
+      -P "$MQTT_ROUTE_PASSWORD" -t mtk3smp-pico/cmd/test -s
 ```
 
 Check for `mqtt: mapping applied (result=0)` on USB before pressing GP20. Resend the map after a Pico reset. Use the [system test log](../testing/system/TEST_LOG.md) for the full run.
 
-On approach, the barcode worker decodes the frame and the controller logs `Cached barcode` for the first mapped result. The next junction stop consumes that command once after a fresh 100 ms active brake hold. Left and right use the calibrated balanced pivot, and a U-turn uses two right pivots. At an unmarked junction, the car waits up to two seconds from detection for a decoded command, then continues straight when braking has completed and the path is clear. A cached command survives a bypass on the same approach.
+On approach, the barcode worker decodes the frame and the controller logs `Cached barcode` for the first mapped result. The next junction gets a fresh 100 ms active brake hold. Before pivoting, the controller brings the driven axle to the detected marking using the configured 120 mm axle-to-IR distance, less the forward travel recorded while braking. Look for `Advancing … mm to align axle` in the USB log. Left and right use calibrated balanced pivots. A U-turn splits the signed `ROBOT_JUNCTION_UTURN_COMMAND_DEG` target, currently 200, into two balanced pivots with a brake hold after each. At a junction without a command, the car waits up to two seconds from detection, then continues straight when stopped and clear. A cached command survives a bypass, including one that interrupts the axle advance. [Calibration](../config/sensor_calibration.h)
 
 ## Open the dashboard
 
@@ -58,7 +60,7 @@ Open `http://127.0.0.1:8501`. If your broker listens only on the laptop's Wi-Fi 
 
 **Overview** shows drive state, the run-stop latch, and the last barcode. Use **Overview cards** in the sidebar to choose which cards to show. **Sensors** shows IR levels, accelerometer readings, the hump peak, forward range, obstacle width and scan status, and a chart of recent acceleration. **MQTT diagnostics** shows subscription confirmation, exact topics, and recent connection and packet events.
 
-The status row tracks broker subscriptions, the five-second robot MQTT heartbeat, and bench telemetry separately. **Waiting** means no packet has arrived on that stream. **Stale** means the last readings are still displayed after that stream stopped. If the broker is connected and both counters remain at zero, check `wifi: link up` and `mqtt: connected to` on USB serial and confirm the displayed broker address matches the firmware you flashed. The `[HEARTBEAT] Pico alive` line is generated locally by the USB app. If the MQTT heartbeat arrives but bench telemetry is still waiting, verify that the current `_lwip_mqtt.uf2` is on the robot.
+The status row tracks broker subscriptions, the five-second robot MQTT heartbeat, and bench telemetry separately. **Waiting** means no packet has arrived on that stream. **Stale** means the last readings are still displayed after that stream stopped. If the broker is connected and both counters remain at zero, check `wifi: link up` and `mqtt: connected to` on USB serial and confirm the displayed broker address matches the firmware you flashed. The `[HEARTBEAT] Pico alive` line is generated locally by the USB app. If startup fails, the MQTT heartbeat carries the startup step and error code, which Overview displays. The firmware retries failed Wi-Fi joins and cancels MQTT connections that stall during setup.
 
 ## Watch or record a test
 
@@ -91,7 +93,7 @@ During the straight roll, compare the changes in both raw wheel counters. Motion
 
 The default GP20 cruise target is 5 ticks per 10 ms at the 50% line setting. Motion Control filters each wheel's speed, limits the rate of steering changes, and adds a bounded correction when a wheel consistently misses the target. Time a straight flat pass to measure the actual speed before testing the hump.
 
-During line following, `steer_request` in the heartbeat is negative for a left correction, positive for a right correction, and zero for straight. `LINE_STEERING_CORRECTION` is the percentage of cruise speed shifted from the inner wheel to the outer wheel. At the default 40% and 5-tick cruise, a sustained left correction targets 3 ticks on the left and 7 on the right per 10 ms.
+During line following, `steer_request` in the heartbeat is negative for a left correction, positive for a right correction, and zero for straight. `LINE_STEERING_CORRECTION` is the percentage of cruise speed shifted from the inner wheel to the outer wheel. The current setting is 65%.
 
 For a timing comparison, build with `make -j8 NET=lwip MQTT=1 BARCODE_CAPTURE=0` and flash the `_barcode_off.uf2` image. Both wheel encoders, line following, the IMU stop and MQTT run in this image. The default build uses `BARCODE_CAPTURE=1`. Compare `control_gap_max_us`, the longest interval between Motion Control updates since the previous heartbeat, and elapsed travel time over the same flat stretch in each image.
 
@@ -119,7 +121,7 @@ The startup message `[ENC] GPIO IRQ ready on core 0.` confirms boot installed th
 
 ## Test obstacle bypass and line recovery
 
-With `OBSTACLE_BYPASS_ENABLED=1`, a valid width scan starts an automatic detour. The firmware uses the measured 130 mm wheel-to-wheel width and an initial distance scale of 11 ticks per mm. Check the two provisional measurements in `config/sensor_calibration.h`. The axle-to-IR distance is set to 65 mm. The radius from the driven axle midpoint to the furthest part of the car is set to 135 mm.
+With `OBSTACLE_BYPASS_ENABLED=1`, a valid width scan starts an automatic detour. The configured vehicle width is 130 mm and the measured drive scale is 11 ticks per mm. The axle-to-IR distance is 120 mm and the swept radius is 115 mm. The separate distance from the driven axle to the servo shaft is 65 mm. Check the fitted chassis before the track run. [Calibration](../config/sensor_calibration.h)
 
 1. Start with a measured box across a straight line and about 500 mm of clear space on each side of the line. Leave straight tape beyond the box for the return. Keep GP20 accessible.
 2. The car checks the shorter detour side first, then tries the other side if sonar detects a blockage. Watch the `[S5 BYPASS]` logs for the outward leg, the parallel moves, and the clearance checks toward the line. `OBSTACLE_BYPASS_ALONG_STEP_MM` sets the advance between blocked checks. Set `OBSTACLE_BYPASS_REQUIRE_SECOND_CLEAR` to 1 to make a second check after travelling `OBSTACLE_BYPASS_AFTER_CLEAR_MM`. This distance must cover the measured turning radius. Set it to 0 to return at the first clear position and check that there is room for the final turn there.

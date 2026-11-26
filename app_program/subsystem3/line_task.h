@@ -181,7 +181,7 @@ ER line_task_get_steering(line_steering_t *steering);
  * Same buffer as barcode is allowed; max message size must support both types.
  * event/fault flags optional only together (flag0 -> both bits0).
  * No binding: junctions are still classified, but event delivery faults and
- * routine steering stays held. No hidden polling consumer or fake controller.
+ * routine steering stays held until the controller grants permission.
  */
 ER line_task_bind_controller(ID event_buffer, ID controller_flag, UINT event_bit, UINT fault_bit);
 /* Controller uses after decoding, before using a junction event. Checks the

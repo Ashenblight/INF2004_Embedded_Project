@@ -117,9 +117,13 @@ ER obstacle_scan_init(void)
     /* S2 has released the PWM block. Only configure slice 6. */
     out_w(PWM_CH6_BASE + PWM_CHx_CSR, 0U);
     out_w(PWM_CH6_BASE + PWM_CHx_DIV, (UW)TMCLK_MHz << 4U);
-    out_w(PWM_CH6_BASE + PWM_CHx_CTR, 0U);
     (void)pwm_set_wrap(OBSTACLE_SERVO_GPIO, SERVO_PWM_FRAME_US - 1U);
+    /* Start in the low part of the frame so switching the mux cannot
+     * hold the first pulse high if the task is preempted before enable. */
+    out_w(PWM_CH6_BASE + PWM_CHx_CTR, SERVO_PWM_FRAME_US - 1U);
     servo_set_angle(0);
+    clr_w(GPIO(OBSTACLE_SERVO_GPIO), GPIO_PUE);
+    set_w(GPIO(OBSTACLE_SERVO_GPIO), GPIO_PDE);
     const ER result = pwm_set_pin(OBSTACLE_SERVO_GPIO);
     return result == E_OK ? pwm_set_enabled(OBSTACLE_SERVO_GPIO, 1) : result;
 }
@@ -377,11 +381,17 @@ static void poll_pivot(uint32_t now_ms)
     {
         const uint32_t elapsed = now_ms - g_scan.pivot_started_ms;
         if (g_scan.pivot_settling)
+        {
             pivot_timed_out("motion restarted during pivot settling", motion.state);
+        }
         else if (!g_scan.pivot_saw_motion && elapsed >= PIVOT_START_TIMEOUT_MS)
+        {
             pivot_timed_out("turn did not start", motion.state);
+        }
         else if (elapsed >= PIVOT_MOVE_TIMEOUT_MS)
+        {
             pivot_timed_out("turn did not finish", motion.state);
+        }
         return;
     }
     if (!g_scan.pivot_settling)
@@ -394,7 +404,9 @@ static void poll_pivot(uint32_t now_ms)
     if (!wheels_still(now_ms, left, right))
     {
         if (now_ms - g_scan.pivot_stopped_ms >= PIVOT_SETTLE_TIMEOUT_MS)
+        {
             pivot_timed_out("encoder counts did not settle after braking", motion.state);
+        }
         return;
     }
 
